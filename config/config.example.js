@@ -4,10 +4,37 @@ require('dotenv').config()
 const config = {
   // 🌐 服务器配置
   server: {
-    port: parseInt(process.env.PORT) || 3000,
-    host: process.env.HOST || '0.0.0.0',
+    // 应用自身监听端口 / 地址。
+    // 默认只绑回环地址：由 Nginx 按端口把「对外 API」和「后台管理」分开暴露（见下方 nginx 段）。
+    // 若改成 0.0.0.0，管理台会直接暴露在该端口上（启动时会告警）。
+    port: parseInt(process.env.PORT, 10) || 13000,
+    host: process.env.HOST || '127.0.0.1',
     nodeEnv: process.env.NODE_ENV || 'development',
     trustProxy: process.env.TRUST_PROXY === 'true'
+  },
+
+  // 🌐 反向代理（Nginx）对外入口 —— 对外 API 与后台管理分离
+  //
+  // 部署形态（install.sh 会自动安装 Nginx 并按本段生成配置）：
+  //   客户端  ──▶ Nginx :nginx.publicPort ──▶ 127.0.0.1:server.port   仅放行业务路由
+  //   管理员  ──▶ Nginx :nginx.adminPort  ──▶ 127.0.0.1:server.port   放行管理台
+  //
+  // 隔离点在 Nginx：对外端口只代理 publicPathPrefixes / publicExactPaths，
+  // 其余路径（/admin /users /web /apiStats /admin-next 等管理面）一律返回 404。
+  nginx: {
+    // 对外调用端口（Claude Code / Codex 等客户端指向这里）
+    publicPort: parseInt(process.env.NGINX_PUBLIC_PORT, 10) || 8080,
+    // 后台管理端口
+    adminPort: parseInt(process.env.NGINX_ADMIN_PORT, 10) || 28080,
+    serverName: process.env.NGINX_SERVER_NAME || '_',
+    clientMaxBodySize: process.env.NGINX_CLIENT_MAX_BODY_SIZE || '100m',
+    // 生成的配置文件位置
+    confDir: process.env.NGINX_CONF_DIR || '/etc/nginx/conf.d',
+    snippetPath: process.env.NGINX_SNIPPET_PATH || '/etc/nginx/relay_proxy.conf',
+    // 对外端口只代理这些前缀（其余一律 404，管理面不在其中）
+    publicPathPrefixes: ['/api', '/claude', '/gemini', '/openai', '/droid', '/azure'],
+    // 对外端口额外精确匹配的路径
+    publicExactPaths: ['/health']
   },
 
   // 🔒 HTTPS 监听配置（一把开关；启用后仅监听 HTTPS 端口，HTTP 端口不再监听）
@@ -90,8 +117,7 @@ const config = {
   // 📋 模型清单（modelCatalogService）
   models: {
     // 上游清单全局多久拉一次（默认 24h，即「全局一天一次」）
-    catalogSuccessTtlMs:
-      parseInt(process.env.MODELS_CATALOG_SUCCESS_TTL_MS) || 24 * 60 * 60 * 1000,
+    catalogSuccessTtlMs: parseInt(process.env.MODELS_CATALOG_SUCCESS_TTL_MS) || 24 * 60 * 60 * 1000,
     // 拉取失败后最短重试间隔，避免上游异常时被每个请求各打一次
     catalogFailureRetryMs: parseInt(process.env.MODELS_CATALOG_FAILURE_RETRY_MS) || 30 * 60 * 1000,
     // models 列表端点是否按 API Key 权限分段过滤（出问题可不发版关闭）

@@ -189,9 +189,6 @@ appendonly.aof
 ecosystem.config.js
 .pm2/
 
-# Docker files (keep main ones, ignore volumes)
-.docker/
-docker-volumes/
 
 # Monitoring data
 prometheus/

@@ -60,7 +60,6 @@ HTTPS_SAN=IP:203.0.113.10,DNS:relay.internal,IP:127.0.0.1
 
 ```bash
 npm start
-# 或 docker-compose restart
 ```
 
 首次启动日志示例：
@@ -159,30 +158,7 @@ npm start
 HTTPS_ENABLED=false
 ```
 
-重启后恢复监听 `HTTP_PORT`（默认 3000）。
-
----
-
-## Docker 部署
-
-`docker-compose.yml` 已预置端口映射和环境变量，容器内监听 `3443`，可通过 `HTTPS_BIND_PORT` 改宿主端口（默认 `3443:3443`）。
-
-```yaml
-ports:
-  - "${BIND_HOST:-0.0.0.0}:${HTTPS_BIND_PORT:-3443}:3443"
-environment:
-  - HTTPS_ENABLED=${HTTPS_ENABLED:-false}
-  - HTTPS_SAN=${HTTPS_SAN:-}
-  # ... 其余 HTTPS_* 变量
-```
-
-若要映射宿主 443：
-
-```bash
-HTTPS_BIND_PORT=443 docker-compose up -d
-```
-
-容器内保持 3443（<1024 端口容器默认无权限绑定，除非加 `CAP_NET_BIND_SERVICE`）。
+重启后恢复监听 `PORT`（默认 13000）。
 
 ---
 

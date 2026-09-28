@@ -675,6 +675,22 @@ class Application {
           )
         }
         logger.info(`🗄️  metadata backend: ${config.metadata.backend}`)
+
+        // 🌐 Nginx 对外的两个入口（对外 API / 后台管理 分离）
+        const nginxCfg = config.nginx
+        if (nginxCfg && nginxCfg.publicPort && nginxCfg.adminPort) {
+          logger.info(
+            `🌐 Nginx 入口: 对外 API → :${nginxCfg.publicPort} · 后台管理 → :${nginxCfg.adminPort}`
+          )
+        }
+        // 🛡️ 管理面暴露告警：应用监听非回环地址时，管理台会绕过 Nginx 直接可达
+        const bindHost = config.server.host
+        if (bindHost !== '127.0.0.1' && bindHost !== 'localhost') {
+          logger.warn(
+            `⚠️ server.host=${bindHost} 非回环地址：管理台 /admin-next 与 /admin 会直接暴露在该端口上，` +
+              '不受 Nginx 的对外/管理端口隔离保护。使用 Nginx 分离入口时请设置 HOST=127.0.0.1。'
+          )
+        }
       })
 
       const serverTimeout = 600000 // 默认10分钟

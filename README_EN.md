@@ -5,7 +5,6 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Node.js](https://img.shields.io/badge/Node.js-18+-green.svg)](https://nodejs.org/)
 [![Redis](https://img.shields.io/badge/Redis-6+-red.svg)](https://redis.io/)
-[![Docker](https://img.shields.io/badge/Docker-Ready-blue.svg)](https://www.docker.com/)
 
 **🔐 Self-hosted Claude API relay service with multi-account management**
 
@@ -148,13 +147,13 @@ Or download first (to review / pass custom args):
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/zhouzh528/llm-relay-service/main/install.sh -o install.sh
-sudo bash install.sh                          # default: /opt/relay-service, port 3000
+sudo bash install.sh                          # default: /opt/relay-service, app port 13000, Nginx public 8080 / admin 28080
 sudo bash install.sh /opt/relay-service 8080  # custom install dir & port
 ```
 
 ### Interactive vs non-interactive
 
-- **Interactive TTY**: prompts for port, admin username/password (≥8 chars with digit/letter/special), Redis mode (existing instance / new dedicated instance). Blank = auto-generate.
+- **Interactive TTY**: prompts for the app listen port, the Nginx public/admin ports, admin username/password (≥8 chars with digit/letter/special), and Redis mode (existing instance / new dedicated instance). Blank = auto-generate.
 - **Non-interactive** (e.g. piped): defaults to launching a new local-only Redis instance (random password, port auto-picked from 6380) and generates random admin credentials. Check `data/init.json` after install.
 
 ### After install
@@ -260,7 +259,7 @@ REDIS_PASSWORD=
 ```javascript
 module.exports = {
   server: {
-    port: 3000,          // Service port, can be changed
+    port: 13000,         // App listen port (loopback only by default; Nginx fronts it)
     host: '0.0.0.0'     // Don't change
   },
   redis: {
@@ -305,7 +304,7 @@ npm run service:logs           # View logs
 
 ### 1. Open Management Interface
 
-Browser visit: `http://your-server-IP:3000/web`
+Browser visit: `http://your-server-IP:28080/admin-next/`
 
 Default admin account: Look in data/init.json
 
@@ -367,7 +366,7 @@ Now you can replace the official API with your own service:
 Default uses standard Claude account pool:
 
 ```bash
-export ANTHROPIC_BASE_URL="http://127.0.0.1:3000/api/" # Fill in your server's IP address or domain
+export ANTHROPIC_BASE_URL="http://127.0.0.1:8080/api/" # Fill in your server's IP address or domain
 export ANTHROPIC_AUTH_TOKEN="API key created in the backend"
 ```
 
@@ -390,7 +389,7 @@ If the file doesn't exist, create it manually. Windows users path is `C:\Users\Y
 Each account enjoys 1000 requests per day, 60 requests per minute free quota.
 
 ```bash
-CODE_ASSIST_ENDPOINT="http://127.0.0.1:3000/gemini"  # Fill in your server's IP address or domain
+CODE_ASSIST_ENDPOINT="http://127.0.0.1:8080/gemini"  # Fill in your server's IP address or domain
 GOOGLE_CLOUD_ACCESS_TOKEN="API key created in the backend"
 GOOGLE_GENAI_USE_GCA="true"
 GEMINI_MODEL="gemini-2.5-pro"
@@ -403,7 +402,7 @@ GEMINI_MODEL="gemini-2.5-pro"
 Very limited free quota, easily triggers 429 errors.
 
 ```bash
-GOOGLE_GEMINI_BASE_URL="http://127.0.0.1:3000/gemini"  # Fill in your server's IP address or domain
+GOOGLE_GEMINI_BASE_URL="http://127.0.0.1:8080/gemini"  # Fill in your server's IP address or domain
 GEMINI_API_KEY="API key created in the backend"
 GEMINI_MODEL="gemini-2.5-pro"
 ```
@@ -442,8 +441,8 @@ npm run service:stop
 
 ### Monitor Usage
 
-- **Web Interface**: `http://your-domain:3000/web` - View usage statistics
-- **Health Check**: `http://your-domain:3000/health` - Confirm service is normal
+- **Web Interface**: `http://your-domain:28080/admin-next/` - View usage statistics
+- **Health Check**: `http://your-domain:8080/health` - Confirm service is normal
 - **Log Files**: Various log files in `logs/` directory
 
 ### Upgrade Guide
@@ -541,7 +540,7 @@ For production environments, it is recommended to use a reverse proxy for automa
 
 ## Caddy Solution
 
-Caddy is a web server that automatically manages HTTPS certificates, with simple configuration and excellent performance, ideal for deployments without Docker environments.
+Caddy is a web server that automatically manages HTTPS certificates, with simple configuration and excellent performance, ideal for deployments that want zero extra dependencies.
 
 **1. Install Caddy**
 
@@ -566,7 +565,7 @@ Edit `/etc/caddy/Caddyfile`:
 ```caddy
 your-domain.com {
     # Reverse proxy to local service
-    reverse_proxy 127.0.0.1:3000 {
+    reverse_proxy 127.0.0.1:13000 {
         # Support streaming responses or SSE
         flush_interval -1
 
@@ -610,7 +609,7 @@ Since Caddy automatically manages HTTPS, you can restrict the service to listen 
 // config/config.js
 module.exports = {
   server: {
-    port: 3000,
+    port: 13000,
     host: '127.0.0.1' // Listen locally only
   }
 }
@@ -629,6 +628,10 @@ module.exports = {
 
 Nginx Proxy Manager manages reverse proxies and HTTPS certificates through a graphical interface, deployed as a Docker container.
 
+> Note: with the default `HOST=127.0.0.1` the app only listens on the host loopback, so a containerized NPM cannot reach it.
+> Either set `HOST=0.0.0.0` (this also exposes the admin panel — restrict it with a firewall/security group),
+> or run NPM with host networking. Using the built-in Nginx option above is recommended.
+
 **1. Create a New Proxy Host in NPM**
 
 Configure the Details as follows:
@@ -638,7 +641,7 @@ Configure the Details as follows:
 | Domain Names          | relay.example.com        |
 | Scheme                | http                     |
 | Forward Hostname / IP | 192.168.0.1 (docker host IP) |
-| Forward Port          | 3000                     |
+| Forward Port          | 13000                    |
 | Block Common Exploits | ☑️                       |
 | Websockets Support    | ❌ **Disable**            |
 | Cache Assets          | ❌ **Disable**            |
@@ -714,11 +717,10 @@ proxy_request_buffering off;
 * 🔒 Automatic certificate application and renewal
 * 🔧 Graphical interface for easy multi-service management
 * ⚡ Native HTTP/2 / HTTPS support
-* 🚀 Ideal for Docker container deployments
 
 ---
 
-Both solutions are suitable for production deployment. If you use a Docker environment, **Nginx Proxy Manager is more convenient**; if you want to keep software lightweight and automated, **Caddy is a better choice**.
+All the options above are suitable for production deployment.
 
 ---
 

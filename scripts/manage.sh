@@ -1583,9 +1583,6 @@ create_symlink() {
         script_path="$APP_DIR/scripts/manage.sh"
         # 确保脚本有执行权限
         chmod +x "$script_path" 2>/dev/null || sudo chmod +x "$script_path" 2>/dev/null || true
-    elif [ -f "/app/scripts/manage.sh" ] && [ "$(basename "$0")" = "manage.sh" ]; then
-        # Docker 容器中的路径
-        script_path="/app/scripts/manage.sh"
     elif command_exists realpath; then
         script_path="$(realpath "$0")"
     elif command_exists readlink && readlink -f "$0" >/dev/null 2>&1; then

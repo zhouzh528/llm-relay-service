@@ -17,14 +17,12 @@
    - 检测到只有VERSION文件变更的提交
    - 自动创建Git tag
    - 创建GitHub Release
-   - 构建并推送Docker镜像
    - 发送Telegram通知（如果配置）
 
 ### 2. 工作流文件说明
 
 - **auto-version-bump.yml**: 自动检测代码变更并更新VERSION文件
 - **release-on-version.yml**: 检测VERSION文件单独提交并触发发布
-- **docker-publish.yml**: 在tag创建时构建Docker镜像（备用）
 - **release.yml**: 在tag创建时生成Release（备用）
 
 ### 3. 版本号规范
@@ -38,7 +36,7 @@
 
 **会触发版本更新的文件变更**:
 - 源代码文件（.js, .ts, .jsx, .tsx等）
-- 配置文件（package.json, Dockerfile等）
+- 配置文件（package.json 等）
 - 其他功能性文件
 
 **不会触发版本更新的文件变更**:
@@ -65,7 +63,7 @@ git push origin main
 # GitHub Actions会自动：
 # 1. 检测到代码变更
 # 2. 更新VERSION文件（例如：1.1.10 → 1.1.11）
-# 3. 创建新的release和Docker镜像
+# 3. 创建新的 release
 ```
 
 ### 跳过版本更新

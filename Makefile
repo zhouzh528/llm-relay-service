@@ -1,7 +1,7 @@
 # Claude Relay Service Makefile
 # 功能完整的 AI API 中转服务，支持 Claude 和 Gemini 双平台
 
-.PHONY: help install setup dev start test lint clean docker-up docker-down service-start service-stop service-status logs cli-admin cli-keys cli-accounts cli-status ci-release-trigger
+.PHONY: help install setup dev start test lint clean service-start service-stop service-status logs cli-admin cli-keys cli-accounts cli-status ci-release-trigger
 
 # 默认目标：显示帮助信息
 help:
@@ -25,11 +25,6 @@ help:
 	@echo "    test           - 运行测试套件"
 	@echo "    lint           - 代码风格检查"
 	@echo ""
-	@echo "  🐳 Docker 部署："
-	@echo "    docker-up      - 启动 Docker 服务"
-	@echo "    docker-up-full - 启动 Docker 服务（包含监控）"
-	@echo "    docker-down    - 停止 Docker 服务"
-	@echo "    docker-logs    - 查看 Docker 日志"
 	@echo ""
 	@echo "  🔧 服务管理："
 	@echo "    service-start  - 前台启动服务"
@@ -98,23 +93,6 @@ test:
 lint:
 	@echo "🔍 执行代码风格检查..."
 	npm run lint
-
-# Docker 部署
-docker-up:
-	@echo "🐳 启动 Docker 服务..."
-	docker-compose up -d
-
-docker-up-full:
-	@echo "🐳 启动 Docker 服务（包含监控）..."
-	docker-compose --profile monitoring up -d
-
-docker-down:
-	@echo "🛑 停止 Docker 服务..."
-	docker-compose down
-
-docker-logs:
-	@echo "📋 查看 Docker 服务日志..."
-	docker-compose logs -f
 
 # 服务管理
 service-start:
@@ -194,7 +172,7 @@ dev-full: install install-web build-web setup dev
 	@echo "🚀 全栈开发环境启动！"
 
 # 完整部署流程
-deploy: clean install install-web build-web setup test lint docker-up
+deploy: clean install install-web build-web setup test lint
 	@echo "🎉 部署完成！"
 	@echo "访问 Web 管理界面: http://localhost:3000/web"
 	@echo "API 端点: http://localhost:3000/api/v1/messages"

@@ -123,9 +123,6 @@ git tag -l
 ```bash
 # 回滚到特定版本
 git checkout v1.0.1
-
-# 或者使用 Docker 镜像的特定版本
-docker pull weishaw/claude-relay-service:v1.0.1
 ```
 
 ### Q: 如何修改版本递增规则？
@@ -158,7 +155,5 @@ NEW_PATCH=0
 
 ## 🔗 相关链接
 
-- [GitHub Actions 工作流使用指南](./WORKFLOW_USAGE.md)
 - [Telegram 通知设置指南](./TELEGRAM_SETUP.md)
-- [Docker Hub 设置指南](./DOCKER_HUB_SETUP.md)
 - [Git Cliff 配置文档](https://git-cliff.org/docs/configuration)

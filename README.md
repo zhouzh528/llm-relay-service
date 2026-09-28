@@ -5,7 +5,6 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Node.js](https://img.shields.io/badge/Node.js-18+-green.svg)](https://nodejs.org/)
 [![Redis](https://img.shields.io/badge/Redis-6+-red.svg)](https://redis.io/)
-[![Docker](https://img.shields.io/badge/Docker-Ready-blue.svg)](https://www.docker.com/)
 
 **🔐 自行搭建 Claude API 中转服务，支持多账户管理**
 
@@ -134,7 +133,6 @@ Claude、Gemini、OpenAI 等账户集中管理，会话窗口一目了然。
 
 仓库根目录提供 `install.sh`，适用于 **Ubuntu / Debian / CentOS / RHEL / Rocky / AlmaLinux / 阿里云 Linux**。脚本会自动安装 Node.js 20、Redis、克隆仓库、构建前端 SPA、生成 `.env`、写入 systemd 单元并启动服务。
 
-macOS 用户可使用 `install-macos.sh`。脚本会自动安装/检查 Homebrew、Node.js 20、Redis、Claude Code CLI，克隆仓库、构建前端 SPA、生成 `.env`，并写入当前用户的 LaunchAgent（随登录自动启动）。
 
 ### 一行拉起
 
@@ -146,29 +144,13 @@ curl -fsSL https://raw.githubusercontent.com/zhouzh528/llm-relay-service/main/in
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/zhouzh528/llm-relay-service/main/install.sh -o install.sh
-sudo bash install.sh                          # 默认: /opt/relay-service, 端口 3000
-sudo bash install.sh /opt/relay-service 8080  # 自定义安装目录和端口
-```
-
-### macOS 一键安装
-
-> 请使用普通用户运行，不要加 `sudo`。默认安装到 `~/relay-service`，端口 `3000`。
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/zhouzh528/llm-relay-service/main/install-macos.sh | bash
-```
-
-或先下载再执行：
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/zhouzh528/llm-relay-service/main/install-macos.sh -o install-macos.sh
-bash install-macos.sh                         # 默认: ~/relay-service, 端口 3000
-bash install-macos.sh "$HOME/relay-service" 8080  # 自定义安装目录和端口
+sudo bash install.sh                          # 默认: /opt/relay-service, 应用端口 13000, Nginx 对外 8080 / 管理 28080
+sudo bash install.sh /opt/relay-service 14000  # 自定义安装目录与应用监听端口
 ```
 
 ### 交互式 / 非交互式
 
-- **交互式终端**：脚本会提示端口、管理员用户名/密码（>=8 字符，含数字/字母/特殊字符）、Redis 部署方式（已有实例 / 新启独立实例）。回车可跳过用自动生成的值。
+- **交互式终端**：脚本会提示应用监听端口、Nginx 对外/管理端口、管理员用户名/密码（>=8 字符，含数字/字母/特殊字符）、Redis 部署方式（已有实例 / 新启独立实例）。回车可跳过用自动生成的值。
 - **非交互式终端**（如管道执行）：自动走默认值——新建一个仅本地访问的独立 Redis 实例（随机密码、端口 6380 起自动避让），管理员账号密码随机生成。安装完成后从 `data/init.json` 查看凭据。
 
 ### 安装完成后
@@ -178,15 +160,6 @@ systemctl status relay-service     # 服务状态
 systemctl restart relay-service    # 重启
 journalctl -u relay-service -f     # 实时日志
 cat /opt/relay-service/data/init.json  # 首次管理员凭据
-```
-
-macOS：
-
-```bash
-launchctl print gui/$(id -u)/com.relay-service.app       # 服务状态
-launchctl kickstart -k gui/$(id -u)/com.relay-service.app # 重启
-tail -f ~/relay-service/logs/stderr.log                  # 实时错误日志
-cat ~/relay-service/data/init.json                       # 首次管理员凭据
 ```
 
 管理面板访问：`http://<服务器IP>:<端口>/admin-next/`。
@@ -288,7 +261,7 @@ REDIS_PASSWORD=
 ```javascript
 module.exports = {
   server: {
-    port: 3000, // 服务端口，可以改
+    port: 13000, // 应用监听端口（默认只绑 127.0.0.1，由 Nginx 对外）
     host: '0.0.0.0' // 不用改
   },
   redis: {
@@ -376,77 +349,16 @@ export ANTHROPIC_API_KEY=cr_你的key
 
 ---
 
-## 🐳 Docker 部署
-
-### Docker compose
-
-项目根目录已提供 `docker-compose.yml`，克隆仓库后直接启动即可：
-
-```bash
-git clone https://github.com/zhouzh528/llm-relay-service.git
-cd llm-relay-service
-cp .env.example .env   # 编辑 JWT_SECRET / ENCRYPTION_KEY 等必填项
-docker-compose up -d
-```
-
-### Docker Compose 配置
-
-docker-compose.yml 已包含：
-
-- ✅ 自动初始化管理员账号
-- ✅ 数据持久化（logs和data目录自动挂载）
-- ✅ Redis数据库
-- ✅ 健康检查
-- ✅ 自动重启
-
-### 环境变量说明
-
-#### 必填项
-
-- `JWT_SECRET`: JWT密钥，至少32个字符
-- `ENCRYPTION_KEY`: 加密密钥，必须是32个字符
-
-#### 可选项
-
-- `ADMIN_USERNAME`: 管理员用户名（不设置则自动生成）
-- `ADMIN_PASSWORD`: 管理员密码（不设置则自动生成）
-- `LOG_LEVEL`: 日志级别（默认：info）
-- 更多配置项请参考 `.env.example` 文件
-
-### 管理员凭据获取方式
-
-1. **查看容器日志**
-
-   ```bash
-   docker logs claude-relay-service
-   ```
-
-2. **查看挂载的文件**
-
-   ```bash
-   cat ./data/init.json
-   ```
-
-3. **使用环境变量预设**
-   ```bash
-   # 在 .env 文件中设置
-   ADMIN_USERNAME=cr_admin_custom
-   ADMIN_PASSWORD=your-secure-password
-   ```
-
----
-
 ## 🎮 开始使用
 
 ### 1. 打开管理界面
 
-浏览器访问：`http://你的服务器IP:3000/web`
+浏览器访问：`http://你的服务器IP:28080/admin-next/`
 
 管理员账号：
 
 - 自动生成：查看 data/init.json
 - 环境变量预设：通过 ADMIN_USERNAME 和 ADMIN_PASSWORD 设置
-- Docker 部署：查看容器日志 `docker logs claude-relay-service`
 
 ### 2. 添加Claude账户
 
@@ -513,7 +425,7 @@ docker-compose.yml 已包含：
 默认使用标准 Claude 账号池：
 
 ```bash
-export ANTHROPIC_BASE_URL="http://127.0.0.1:3000/api/" # 根据实际填写你服务器的ip地址或者域名
+export ANTHROPIC_BASE_URL="http://127.0.0.1:8080/api/" # 根据实际填写你服务器的ip地址或者域名
 export ANTHROPIC_AUTH_TOKEN="后台创建的API密钥"
 ```
 
@@ -523,7 +435,7 @@ export ANTHROPIC_AUTH_TOKEN="后台创建的API密钥"
 
 ```bash
 # 1. 设置 Base URL 为 Antigravity 专用路径
-export ANTHROPIC_BASE_URL="http://127.0.0.1:3000/antigravity/api/"
+export ANTHROPIC_BASE_URL="http://127.0.0.1:8080/antigravity/api/"
 
 # 2. 设置 API Key（在后台创建，权限需包含 'all' 或 'gemini'）
 export ANTHROPIC_AUTH_TOKEN="后台创建的API密钥"
@@ -554,7 +466,7 @@ claude
 **方式一（推荐）：通过 Gemini Assist API 方式访问**
 
 ```bash
-CODE_ASSIST_ENDPOINT="http://127.0.0.1:3000/gemini"  # 根据实际填写你服务器的ip地址或者域名
+CODE_ASSIST_ENDPOINT="http://127.0.0.1:8080/gemini"  # 根据实际填写你服务器的ip地址或者域名
 GOOGLE_CLOUD_ACCESS_TOKEN="后台创建的API密钥"
 GOOGLE_GENAI_USE_GCA="true"
 GEMINI_MODEL="gemini-2.5-pro" # 如果你有gemini3权限可以填： gemini-3-pro-preview
@@ -567,7 +479,7 @@ GEMINI_MODEL="gemini-2.5-pro" # 如果你有gemini3权限可以填： gemini-3-p
 
 
 ```bash
-GOOGLE_GEMINI_BASE_URL="http://127.0.0.1:3000/gemini"  # 根据实际填写你服务器的ip地址或者域名
+GOOGLE_GEMINI_BASE_URL="http://127.0.0.1:8080/gemini"  # 根据实际填写你服务器的ip地址或者域名
 GEMINI_API_KEY="后台创建的API密钥"
 GEMINI_MODEL="gemini-2.5-pro" # 如果你有gemini3权限可以填： gemini-3-pro-preview
 ```
@@ -601,7 +513,7 @@ preferred_auth_method = "apikey"
 
 [model_providers.crs]
 name = "crs"
-base_url = "http://127.0.0.1:3000/openai"  # 根据实际填写你服务器的ip地址或者域名
+base_url = "http://127.0.0.1:8080/openai"  # 根据实际填写你服务器的ip地址或者域名
 wire_api = "responses"
 requires_openai_auth = true
 ```
@@ -626,7 +538,7 @@ Droid CLI 读取 `~/.factory/config.json`。可以在该文件中添加自定义
     {
       "model_display_name": "Opus 4.5 [crs]",
       "model": "claude-opus-4-5-20251101",
-      "base_url": "http://127.0.0.1:3000/droid/claude",
+      "base_url": "http://127.0.0.1:8080/droid/claude",
       "api_key": "后台创建的API密钥",
       "provider": "anthropic",
       "max_tokens": 64000
@@ -634,7 +546,7 @@ Droid CLI 读取 `~/.factory/config.json`。可以在该文件中添加自定义
     {
       "model_display_name": "GPT5-Codex [crs]",
       "model": "gpt-5-codex",
-      "base_url": "http://127.0.0.1:3000/droid/openai",
+      "base_url": "http://127.0.0.1:8080/droid/openai",
       "api_key": "后台创建的API密钥",
       "provider": "openai",
       "max_tokens": 16384
@@ -642,7 +554,7 @@ Droid CLI 读取 `~/.factory/config.json`。可以在该文件中添加自定义
     {
       "model_display_name": "Gemini-3-Pro [crs]",
       "model": "gemini-3-pro-preview",
-      "base_url": "http://127.0.0.1:3000/droid/comm/v1/",
+      "base_url": "http://127.0.0.1:8080/droid/comm/v1/",
       "api_key": "后台创建的API密钥",
       "provider": "generic-chat-completion-api",
       "max_tokens": 65535
@@ -650,7 +562,7 @@ Droid CLI 读取 `~/.factory/config.json`。可以在该文件中添加自定义
     {
       "model_display_name": "GLM-4.6 [crs]",
       "model": "glm-4.6",
-      "base_url": "http://127.0.0.1:3000/droid/comm/v1/",
+      "base_url": "http://127.0.0.1:8080/droid/comm/v1/",
       "api_key": "后台创建的API密钥",
       "provider": "generic-chat-completion-api",
       "max_tokens": 202800
@@ -659,7 +571,7 @@ Droid CLI 读取 `~/.factory/config.json`。可以在该文件中添加自定义
 }
 ```
 
-> 💡 将示例中的 `http://127.0.0.1:3000` 替换为你的服务域名或公网地址，并写入后台生成的 API 密钥（cr_ 开头）。
+> 💡 将示例中的 `http://127.0.0.1:8080` 替换为你的服务域名或公网地址，并写入后台生成的 API 密钥（cr_ 开头）。
 
 ### 5. 第三方工具API接入
 
@@ -673,7 +585,7 @@ Cherry Studio支持多种AI服务的接入，下面是不同账号类型的详�
 
 ```
 # API地址
-http://你的服务器:3000/claude
+http://你的服务器:8080/claude
 
 # 模型ID示例
 claude-sonnet-4-5-20250929 # Claude Sonnet 4.5
@@ -682,14 +594,14 @@ claude-opus-4-20250514     # Claude Opus 4
 
 配置步骤：
 - 供应商类型选择"Anthropic"
-- API地址填入：`http://你的服务器:3000/claude`
+- API地址填入：`http://你的服务器:8080/claude`
 - API Key填入：后台创建的API密钥（cr_开头）
 
 **2. Gemini账号接入：**
 
 ```
 # API地址
-http://你的服务器:3000/gemini
+http://你的服务器:8080/gemini
 
 # 模型ID示例
 gemini-2.5-pro             # Gemini 2.5 Pro
@@ -697,14 +609,14 @@ gemini-2.5-pro             # Gemini 2.5 Pro
 
 配置步骤：
 - 供应商类型选择"Gemini"
-- API地址填入：`http://你的服务器:3000/gemini`
+- API地址填入：`http://你的服务器:8080/gemini`
 - API Key填入：后台创建的API密钥（cr_开头）
 
 **3. Codex接入：**
 
 ```
 # API地址
-http://你的服务器:3000/openai
+http://你的服务器:8080/openai
 
 # 模型ID（固定）
 gpt-5                      # Codex使用固定模型ID
@@ -712,17 +624,17 @@ gpt-5                      # Codex使用固定模型ID
 
 配置步骤：
 - 供应商类型选择"Openai-Response"
-- API地址填入：`http://你的服务器:3000/openai`
+- API地址填入：`http://你的服务器:8080/openai`
 - API Key填入：后台创建的API密钥（cr_开头）
 - **重要**：Codex只支持Openai-Response标准
 
 
 **Cherry Studio 地址格式重要说明：**
 
-- ✅ **推荐格式**：`http://你的服务器:3000/claude`（不加结尾 `/`，让 Cherry Studio 自动加上 v1）
-- ✅ **等效格式**：`http://你的服务器:3000/claude/v1/`（手动指定 v1 并加结尾 `/`）
+- ✅ **推荐格式**：`http://你的服务器:8080/claude`（不加结尾 `/`，让 Cherry Studio 自动加上 v1）
+- ✅ **等效格式**：`http://你的服务器:8080/claude/v1/`（手动指定 v1 并加结尾 `/`）
 - 💡 **说明**：这两种格式在 Cherry Studio 中是完全等效的
-- ❌ **错误格式**：`http://你的服务器:3000/claude/`（单独的 `/` 结尾会被 Cherry Studio 忽略 v1 版本）
+- ❌ **错误格式**：`http://你的服务器:8080/claude/`（单独的 `/` 结尾会被 Cherry Studio 忽略 v1 版本）
 
 #### 其他第三方工具接入
 
@@ -766,8 +678,8 @@ npm run service:stop
 
 ### 监控使用情况
 
-- **Web界面**: `http://你的域名:3000/web` - 查看使用统计
-- **健康检查**: `http://你的域名:3000/health` - 确认服务正常
+- **Web界面**: `http://你的域名:8080/web` - 查看使用统计
+- **健康检查**: `http://你的域名:8080/health` - 确认服务正常
 - **日志文件**: `logs/` 目录下的各种日志文件
 
 ### 灾备与恢复
@@ -935,7 +847,7 @@ redis-cli ping
 
 若部署环境**没有公网域名**（例如仅通过固定 IP 对内部团队暴露），可直接由应用层开启 HTTPS。启用后服务会自动生成一套**私有 CA + server 证书**，管理员在后台下载根 CA 分发给各客户端导入系统信任库。
 
-> 📖 **完整文档**：[应用层 HTTPS（私有 CA）使用指南](docs/https-private-ca-guide/README.md) — 含工作原理、系统级/SDK 级信任分发、Docker 端口映射、环境变量速查、常见错误排查。
+> 📖 **完整文档**：[应用层 HTTPS（私有 CA）使用指南](docs/https-private-ca-guide/README.md) — 含工作原理、系统级/SDK 级信任分发、环境变量速查、常见错误排查。
 
 **最小启用步骤：**
 
@@ -980,19 +892,55 @@ SQLITE_STATS_FLUSH_INTERVAL=30
 
 **切换步骤**：`npm run data:migrate:dry` → `npm run data:migrate` → 改 `.env` → 重启。详细流程见 [元数据存储运维指南](docs/metadata-storage-guide/README.md)。
 
-> ⚠️ SQLite 后端**仅支持单实例部署**；多进程同时写入会导致文件锁冲突。Docker 部署时 `data/` 必须挂 volume。
+> ⚠️ SQLite 后端**仅支持单实例部署**；多进程同时写入会导致文件锁冲突。
 
 ---
 
 ### 反向代理部署指南
 
-在生产环境中，建议通过反向代理进行连接，以便使用自动 HTTPS、安全头部和性能优化。下面提供两种常用方案： **Caddy** 和 **Nginx Proxy Manager (NPM)**。
+在生产环境中，建议通过反向代理进行连接，以便使用自动 HTTPS、安全头部和性能优化。下面提供三种方案：**install.sh 内置 Nginx（推荐，自动完成）**、**Caddy** 和 **Nginx Proxy Manager (NPM)**。
+
+---
+
+## Nginx 方案（install.sh 内置，推荐）
+
+`install.sh` 默认会安装并配置 Nginx，把 **对外 API** 与 **后台管理** 拆到两个端口；应用自身只监听回环地址，两个入口的隔离由 Nginx 完成。
+
+| 入口 | 默认端口 | 说明 |
+|---|---|---|
+| 对外 API | `8080` | Claude Code / Codex 等客户端指向这里。仅放行 `/api` `/claude` `/gemini` `/openai` `/droid` `/azure` 与 `/health`，**其余路径（含管理面）一律 404** |
+| 后台管理 | `28080` | 管理台 `/admin-next/` 与全部管理 API |
+| 应用监听 | `13000` | 仅绑定 `127.0.0.1`，不直接对外 |
+
+生成的文件：
+
+- `/etc/nginx/conf.d/relay-service.conf` —— 两个 `server` 块 + `upstream relay_backend`
+- `/etc/nginx/relay_proxy.conf` —— 公共代理参数（SSE 友好：`proxy_buffering off`、`proxy_read_timeout 3600s`、`Connection ""`、`chunked_transfer_encoding on`）
+
+端口可在安装时交互修改，也可用环境变量覆盖：
+
+```bash
+# 默认：装 Nginx，对外 8080 / 管理 28080，应用监听 13000
+sudo bash install.sh /opt/relay-service 13000
+
+# 自定义两个对外端口
+NGINX_PUBLIC_PORT=8080 NGINX_ADMIN_PORT=28080 sudo -E bash install.sh /opt/relay-service 13000
+
+# 不装 Nginx：应用端口直接对外（管理台与 API 同端口可达）
+NGINX_MODE=no sudo -E bash install.sh
+```
+
+对应的配置项在 `config/config.js` 的 `server` 与 `nginx` 两段，`.env` 中为 `PORT` / `HOST` / `NGINX_PUBLIC_PORT` / `NGINX_ADMIN_PORT`。
+
+> ⚠️ 两点注意：
+> 1. 生成的配置带有 `underscores_in_headers on;`。Nginx 默认会丢弃带下划线的请求头（如 Codex CLI 的 `session_id`），缺了它多账号下的粘性会话会失效。
+> 2. 若手动把 `HOST` 改成 `0.0.0.0`，管理台会绕过 Nginx 直接暴露在应用端口上——启动日志会打印告警。
 
 ---
 
 ## Caddy 方案
 
-Caddy 是一款自动管理 HTTPS 证书的 Web 服务器，配置简单、性能优秀，很适合不需要 Docker 环境的部署方案。
+Caddy 是一款自动管理 HTTPS 证书的 Web 服务器，配置简单、性能优秀，很适合不需要额外依赖的部署方案。
 
 **1. 安装 Caddy**
 
@@ -1017,7 +965,7 @@ sudo yum install caddy
 ```caddy
 your-domain.com {
     # 反向代理到本地服务
-    reverse_proxy 127.0.0.1:3000 {
+    reverse_proxy 127.0.0.1:13000 {
         # 支持流式响应或 SSE
         flush_interval -1
 
@@ -1061,7 +1009,7 @@ Caddy 会自动管理 HTTPS，因此可以将服务限制在本地进行监听�
 // config/config.js
 module.exports = {
   server: {
-    port: 3000,
+    port: 13000,
     host: '127.0.0.1' // 只监听本地
   }
 }
@@ -1080,6 +1028,10 @@ module.exports = {
 
 Nginx Proxy Manager 通过图形化界面管理反向代理和 HTTPS 证书，並以 Docker 容器部署。
 
+> 注意：默认 `HOST=127.0.0.1` 时应用只监听宿主机回环地址，容器内的 NPM 无法直连。
+> 用 NPM 时需把 `HOST` 改为 `0.0.0.0`（这会把管理台一并暴露，请配合防火墙/安全组限制），
+> 或让 NPM 使用宿主机网络。推荐直接使用上面的内置 Nginx 方案。
+
 **1. 在 NPM 创建新的 Proxy Host**
 
 Details 配置如下：
@@ -1089,7 +1041,7 @@ Details 配置如下：
 | Domain Names          | relay.example.com       |
 | Scheme                | http                    |
 | Forward Hostname / IP | 192.168.0.1 (docker 机器 IP) |
-| Forward Port          | 3000                    |
+| Forward Port          | 13000                   |
 | Block Common Exploits | ☑️                      |
 | Websockets Support    | ❌ **关闭**                |
 | Cache Assets          | ❌ **关闭**                |
@@ -1165,11 +1117,10 @@ proxy_request_buffering off;
 * 🔒 自动申请和续期证书
 * 🔧 图形化界面，方便管理多服务
 * ⚡ 原生支持 HTTP/2 / HTTPS
-* 🚀 适合 Docker 容器部署
 
 ---
 
-上述两种方案均可用于生产部署。
+上述方案均可用于生产部署。
 
 ---
 

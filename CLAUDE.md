@@ -101,7 +101,7 @@ data/init.json            # 管理员凭据
 
 **运维脚本**：`npm run data:migrate:dry` → `npm run data:migrate`（迁移）；`npm run data:backup`（热备份）；`npm run data:rollback`（反向导出）；`npm run data:cleanup:confirm`（观察期后清理 Redis 旧数据）。
 
-**约束**：SQLite backend 仅支持**单实例部署**；Docker 必须挂 `data/` volume。详见 `docs/metadata-storage-guide/README.md`。
+**约束**：SQLite backend 仅支持**单实例部署**。详见 `docs/metadata-storage-guide/README.md`。
 
 ## 开发规范
 

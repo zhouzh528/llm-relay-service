@@ -1,17 +1,33 @@
 #!/usr/bin/env bash
-# Relay Service 一键安装脚本 (Node + Redis + systemd)
+# Relay Service 一键安装脚本 (Node + Redis + systemd + Nginx)
 # 适用: Ubuntu / Debian / CentOS / RHEL / Rocky / AlmaLinux / Alibaba Cloud Linux
-# 用法: sudo bash install.sh [安装目录] [端口]
-#   例: sudo bash install.sh /opt/relay-service 3000
+# 用法: sudo bash install.sh [安装目录] [应用端口]
+#   例: sudo bash install.sh /opt/relay-service 13000
+#
+# 默认部署形态（对外 API 与后台管理分离，由 Nginx 承载）：
+#   客户端  ──▶ Nginx :8080  ──▶ 127.0.0.1:13000   仅放行业务路由
+#   管理员  ──▶ Nginx :28080 ──▶ 127.0.0.1:13000   放行管理台
+#   应用自身只绑回环地址，不直接对外。
+#   跳过 Nginx（应用端口直接对外）: NGINX_MODE=no sudo bash install.sh
 
 set -euo pipefail
 
 INSTALL_DIR="${1:-/opt/relay-service}"
-PORT="${2:-3000}"
+PORT="${2:-13000}"            # 应用自身监听端口（默认只绑 127.0.0.1，由 Nginx 对外暴露）
 NODE_MAJOR=20
 SERVICE_USER="root"           # 服务以 root 运行 (按需求)
 SERVICE_NAME="relay-service"
 REPO_URL="${REPO_URL:-https://github.com/zhouzh528/llm-relay-service.git}"  # 可用环境变量覆盖
+
+# Nginx 对外入口（对外 API / 后台管理 分离）——均可用环境变量覆盖
+NGINX_PUBLIC_PORT="${NGINX_PUBLIC_PORT:-8080}"          # 对外调用端口
+NGINX_ADMIN_PORT="${NGINX_ADMIN_PORT:-28080}"           # 后台管理端口
+NGINX_MODE="${NGINX_MODE:-yes}"                         # yes=安装并配置 Nginx；no=不安装（应用直接对外）
+NGINX_SERVER_NAME="${NGINX_SERVER_NAME:-_}"
+NGINX_CLIENT_MAX_BODY_SIZE="${NGINX_CLIENT_MAX_BODY_SIZE:-100m}"
+NGINX_CONF_DIR="${NGINX_CONF_DIR:-/etc/nginx/conf.d}"
+NGINX_SNIPPET_PATH="${NGINX_SNIPPET_PATH:-/etc/nginx/relay_proxy.conf}"
+HOST_VALUE="127.0.0.1"                                  # 由 NGINX_MODE 决定，见第 5 节
 
 # ---------- 颜色/打印 ----------
 BLUE=$'\033[0;34m'; GREEN=$'\033[0;32m'; YELLOW=$'\033[1;33m'; RED=$'\033[0;31m'
@@ -113,12 +129,40 @@ if tty_ok; then
 
   # 服务端口
   while :; do
-    printf '服务端口 [%s]: ' "$PORT" >/dev/tty
+    printf '应用监听端口 (仅本机, 由 Nginx 对外) [%s]: ' "$PORT" >/dev/tty
     read -r _in </dev/tty || _in=""
     [[ -z $_in ]] && break
     if [[ $_in =~ ^[0-9]+$ ]] && (( _in >= 1 && _in <= 65535 )); then PORT=$_in; break; fi
     echo "  × 端口必须是 1-65535 的整数" >/dev/tty
   done
+
+  # Nginx 反向代理（对外 API 与后台管理分端口）—— 默认安装，不再询问
+  # 如需跳过（应用端口直接对外）: NGINX_MODE=no bash install.sh
+  if [[ $NGINX_MODE == yes ]]; then
+    while :; do
+      printf '对外 API 端口 (Nginx) [%s]: ' "$NGINX_PUBLIC_PORT" >/dev/tty
+      read -r _in </dev/tty || _in=""
+      [[ -z $_in ]] && break
+      if [[ $_in =~ ^[0-9]+$ ]] && (( _in >= 1 && _in <= 65535 )); then NGINX_PUBLIC_PORT=$_in; break; fi
+      echo "  × 端口必须是 1-65535 的整数" >/dev/tty
+    done
+    while :; do
+      printf '后台管理端口 (Nginx) [%s]: ' "$NGINX_ADMIN_PORT" >/dev/tty
+      read -r _in </dev/tty || _in=""
+      [[ -z $_in ]] && break
+      if [[ $_in =~ ^[0-9]+$ ]] && (( _in >= 1 && _in <= 65535 )); then NGINX_ADMIN_PORT=$_in; break; fi
+      echo "  × 端口必须是 1-65535 的整数" >/dev/tty
+    done
+    if [[ $NGINX_PUBLIC_PORT == "$NGINX_ADMIN_PORT" ]]; then
+      die "对外 API 端口与后台管理端口不能相同 (${NGINX_PUBLIC_PORT})"
+    fi
+    if [[ $NGINX_PUBLIC_PORT == "$PORT" || $NGINX_ADMIN_PORT == "$PORT" ]]; then
+      die "Nginx 端口不能与应用监听端口 ${PORT} 相同"
+    fi
+  else
+    NGINX_MODE=no
+    warn "已跳过 Nginx: 应用会监听 0.0.0.0:${PORT}, 管理台与 API 同端口可达"
+  fi
 
   # 管理员用户名
   printf '管理员用户名 (回车自动生成): ' >/dev/tty
@@ -144,7 +188,7 @@ if tty_ok; then
 
   # Redis 选择
   menu "选择 Redis 部署方式" "新启动 Redis 实例 (仅本地访问)" "使用已有 Redis 实例"
-  if [[ $MENU_CHOICE == 0 ]]; then
+  if [[ $NGINX_MODE == yes ]]; then
     REDIS_MODE=new
   else
     REDIS_MODE=existing
@@ -370,6 +414,8 @@ sync_env_kv() {
   fi
 }
 
+if [[ $NGINX_MODE == yes ]]; then HOST_VALUE=127.0.0.1; else HOST_VALUE=0.0.0.0; fi
+
 if [[ ! -f .env ]]; then
   log "生成 .env (JWT_SECRET / ENCRYPTION_KEY 自动生成)"
   JWT_SECRET=$(openssl rand -hex 32)          # 64 字符
@@ -377,8 +423,11 @@ if [[ ! -f .env ]]; then
   cat >.env <<EOF
 # 由 install.sh 自动生成 — $(date -Iseconds)
 NODE_ENV=production
-HOST=0.0.0.0
+HOST=${HOST_VALUE}
 PORT=${PORT}
+# Nginx 对外入口（对外 API / 后台管理 分离）；HOST=127.0.0.1 时应用仅 Nginx 可达
+NGINX_PUBLIC_PORT=${NGINX_PUBLIC_PORT}
+NGINX_ADMIN_PORT=${NGINX_ADMIN_PORT}
 JWT_SECRET=${JWT_SECRET}
 ENCRYPTION_KEY=${ENCRYPTION_KEY}
 API_KEY_PREFIX=cr_
@@ -395,11 +444,14 @@ EOF
   [[ -n $ADMIN_PASSWORD_USER ]] && echo "ADMIN_PASSWORD=${ADMIN_PASSWORD_USER}" >>.env
   chmod 600 .env
 else
-  log ".env 已存在, 同步 Redis / 管理员配置 (JWT_SECRET / ENCRYPTION_KEY 保留不变)"
+  log ".env 已存在, 同步 Redis / 管理员 / 监听与 Nginx 配置 (JWT_SECRET / ENCRYPTION_KEY 保留不变)"
   sync_env_kv REDIS_HOST "$REDIS_HOST_USER"
   sync_env_kv REDIS_PORT "$REDIS_PORT_USER"
   sync_env_kv REDIS_PASSWORD "$REDIS_PASSWORD_USER"
   sync_env_kv PORT "$PORT"
+  sync_env_kv HOST "$HOST_VALUE"
+  sync_env_kv NGINX_PUBLIC_PORT "$NGINX_PUBLIC_PORT"
+  sync_env_kv NGINX_ADMIN_PORT "$NGINX_ADMIN_PORT"
   [[ -n $ADMIN_USERNAME_USER ]] && sync_env_kv ADMIN_USERNAME "$ADMIN_USERNAME_USER"
   [[ -n $ADMIN_PASSWORD_USER ]] && sync_env_kv ADMIN_PASSWORD "$ADMIN_PASSWORD_USER"
   chmod 600 .env
@@ -492,15 +544,122 @@ wait_for_service() {
 }
 wait_for_service || true
 
+# ---------- 8.5 Nginx 反向代理 (对外 API / 后台管理 分离) ----------
+# 应用只监听 127.0.0.1:${PORT}; 隔离在 Nginx: 对外端口只放行业务路由,
+# 其余(管理面)一律 404; 管理台只从管理端口可达。
+if [[ $NGINX_MODE == yes ]]; then
+  log "安装 Nginx"
+  if command -v nginx >/dev/null 2>&1; then
+    ok "Nginx 已存在: $(nginx -v 2>&1)"
+  else
+    pkg_install nginx || die "Nginx 安装失败"
+  fi
+
+  # 共享代理参数: SSE 长连接友好 + 标准转发头。
+  # 用引号 heredoc(不展开变量), 保留 nginx 自身的 $host / $remote_addr 等变量。
+  log "写入代理参数片段 ${NGINX_SNIPPET_PATH}"
+  cat >"$NGINX_SNIPPET_PATH" <<'EOF'
+# Relay Service 反向代理公共参数 (由 install.sh 生成)
+proxy_http_version 1.1;
+proxy_set_header Host $host;
+proxy_set_header X-Real-IP $remote_addr;
+proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+proxy_set_header X-Forwarded-Proto $scheme;
+proxy_set_header Connection "";
+# 流式响应(SSE)：关闭缓冲与缓存, 放宽超时, 保持分块传输
+proxy_buffering off;
+proxy_cache off;
+proxy_read_timeout 3600s;
+proxy_send_timeout 3600s;
+chunked_transfer_encoding on;
+EOF
+
+  mkdir -p "$NGINX_CONF_DIR"
+  NGINX_CONF_FILE="${NGINX_CONF_DIR}/relay-service.conf"
+  log "写入 Nginx 站点配置 ${NGINX_CONF_FILE}"
+  cat >"$NGINX_CONF_FILE" <<EOF
+# Relay Service 反向代理 (由 install.sh 生成)
+#   ${NGINX_PUBLIC_PORT} = 对外 API 中转 (客户端指向这里)
+#   ${NGINX_ADMIN_PORT}  = 后台管理
+# 应用监听 127.0.0.1:${PORT}
+upstream relay_backend {
+    server 127.0.0.1:${PORT};
+    keepalive 32;
+}
+
+# ---------- 对外 API 端口：仅放行业务路由 ----------
+server {
+    listen ${NGINX_PUBLIC_PORT};
+    server_name ${NGINX_SERVER_NAME};
+    client_max_body_size ${NGINX_CLIENT_MAX_BODY_SIZE};
+    # Claude Code / Codex 会发送带下划线的请求头(如 session_id)，
+    # Nginx 默认丢弃，会导致粘性会话失效。
+    underscores_in_headers on;
+
+    location = /health { proxy_pass http://relay_backend; include ${NGINX_SNIPPET_PATH}; }
+    location /api      { proxy_pass http://relay_backend; include ${NGINX_SNIPPET_PATH}; }
+    location /claude   { proxy_pass http://relay_backend; include ${NGINX_SNIPPET_PATH}; }
+    location /gemini   { proxy_pass http://relay_backend; include ${NGINX_SNIPPET_PATH}; }
+    location /openai   { proxy_pass http://relay_backend; include ${NGINX_SNIPPET_PATH}; }
+    location /droid    { proxy_pass http://relay_backend; include ${NGINX_SNIPPET_PATH}; }
+    location /azure    { proxy_pass http://relay_backend; include ${NGINX_SNIPPET_PATH}; }
+
+    # 管理面不在对外端口暴露
+    location / { return 404; }
+}
+
+# ---------- 后台管理端口 ----------
+server {
+    listen ${NGINX_ADMIN_PORT};
+    server_name ${NGINX_SERVER_NAME};
+    client_max_body_size ${NGINX_CLIENT_MAX_BODY_SIZE};
+    underscores_in_headers on;
+
+    location / { proxy_pass http://relay_backend; include ${NGINX_SNIPPET_PATH}; }
+}
+EOF
+
+  nginx -t || die "Nginx 配置校验失败, 请检查 ${NGINX_CONF_FILE}"
+  systemctl enable nginx >/dev/null 2>&1 || true
+  if systemctl is-active --quiet nginx; then
+    systemctl reload nginx || die "Nginx 重载失败 (端口可能被占用, 检查 ${NGINX_CONF_FILE})"
+    ok "Nginx 已重载"
+  else
+    systemctl start nginx || die "Nginx 启动失败 (端口可能被占用, 检查 ${NGINX_CONF_FILE})"
+    ok "Nginx 已启动"
+  fi
+
+  # 防火墙(仅当 firewalld 在运行时才需要)
+  if systemctl is-active --quiet firewalld 2>/dev/null; then
+    firewall-cmd --permanent --add-port="${NGINX_PUBLIC_PORT}/tcp" >/dev/null 2>&1 || true
+    firewall-cmd --permanent --add-port="${NGINX_ADMIN_PORT}/tcp" >/dev/null 2>&1 || true
+    firewall-cmd --reload >/dev/null 2>&1 || true
+    ok "firewalld 已放行 ${NGINX_PUBLIC_PORT} / ${NGINX_ADMIN_PORT}"
+  fi
+  warn "如使用云服务器, 还需在安全组放行 ${NGINX_PUBLIC_PORT} 与 ${NGINX_ADMIN_PORT}"
+fi
+
 # ---------- 9. 收尾 ----------
 echo
 echo "════════════════════════════════════════════════════════"
 ok "Relay Service 安装完成"
 echo "════════════════════════════════════════════════════════"
 IP=$(curl -fsS --max-time 3 ifconfig.me 2>/dev/null || hostname -I | awk '{print $1}')
-echo "  管理面板:   http://${IP}:${PORT}/admin-next/"
-echo "  健康检查:   http://${IP}:${PORT}/health"
-echo "  API 端点:   http://${IP}:${PORT}/api"
+if [[ $NGINX_MODE == yes ]]; then
+  echo "  对外 API:   http://${IP}:${NGINX_PUBLIC_PORT}/api   (客户端指向这里)"
+  echo "  管理面板:   http://${IP}:${NGINX_ADMIN_PORT}/admin-next/"
+  echo "  健康检查:   http://${IP}:${NGINX_PUBLIC_PORT}/health"
+  echo "  应用监听:   127.0.0.1:${PORT}  (仅 Nginx 可达)"
+  echo
+  echo "  Nginx:"
+  echo "    配置:      ${NGINX_CONF_DIR}/relay-service.conf"
+  echo "    代理参数:  ${NGINX_SNIPPET_PATH}"
+  echo "    重载:      nginx -t && systemctl reload nginx"
+else
+  echo "  管理面板:   http://${IP}:${PORT}/admin-next/"
+  echo "  健康检查:   http://${IP}:${PORT}/health"
+  echo "  API 端点:   http://${IP}:${PORT}/api"
+fi
 echo "  Redis:     ${REDIS_HOST_USER}:${REDIS_PORT_USER}"
 echo
 if [[ -f data/init.json ]]; then

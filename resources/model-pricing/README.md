@@ -13,7 +13,6 @@ This local copy serves as a fallback when the remote file cannot be downloaded d
 - Firewall rules
 - DNS resolution issues
 - GitHub being blocked in certain regions
-- Docker container network limitations
 
 ## Update Process
 The pricingService will:

@@ -35,26 +35,11 @@
         <p class="ops__eyebrow">部署与运维</p>
         <h2 class="ops__title">管理你的服务</h2>
         <p class="ops__sub">
-          元数据默认持久化到 SQLite（<code>data/metadata.db</code>），Redis
-          仅作缓存与热状态。按部署平台选择对应命令：
+          元数据默认持久化到 SQLite（<code>data/metadata.db</code>），Redis 仅作缓存与热状态。服务由
+          systemd 托管（<code>relay-service</code>）：
         </p>
-        <div class="ops__tabs" role="tablist">
-          <button
-            v-for="p in platforms"
-            :key="p.key"
-            :aria-selected="activePlatform === p.key"
-            class="ops__tab"
-            :class="{ 'ops__tab--active': activePlatform === p.key }"
-            role="tab"
-            type="button"
-            @click="activePlatform = p.key"
-          >
-            <i :class="p.icon" />
-            <span>{{ p.label }}</span>
-          </button>
-        </div>
         <div class="ops__grid">
-          <article v-for="cmd in serviceCommands[activePlatform]" :key="cmd.code" class="ops__card">
+          <article v-for="cmd in serviceCommands.linux" :key="cmd.code" class="ops__card">
             <h3 class="ops__card-title">{{ cmd.title }}</h3>
             <p class="ops__card-desc">{{ cmd.desc }}</p>
             <div class="ops__code">
@@ -157,17 +142,10 @@ const steps = [
   }
 ]
 
-const platforms = [
-  { key: 'linux', label: 'Linux', icon: 'fab fa-linux' },
-  { key: 'mac', label: 'macOS', icon: 'fab fa-apple' }
-]
-const activePlatform = ref('linux')
-
 // Claude Code → GPT 适配的客户端配置命令
 const gptBaseUrlCmd = 'export ANTHROPIC_BASE_URL=http://<host>:<port>/claude/openai'
 
 // Linux: 跨平台进程管理脚本 scripts/manage.js（PID + nohup）
-// macOS: launchd KeepAlive 代理 com.relay-service.app
 const serviceCommands = {
   linux: [
     {
@@ -194,33 +172,6 @@ const serviceCommands = {
       title: '更新',
       desc: '拉取最新代码 → 安装依赖 → 构建前端 → 自动后台重启。',
       code: 'npm run service:update'
-    }
-  ],
-  mac: [
-    {
-      title: '启动',
-      desc: '加载并启动 launchd 服务（KeepAlive 自动守护）。',
-      code: 'launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.relay-service.app.plist'
-    },
-    {
-      title: '停止',
-      desc: '卸载 launchd 服务（停止并取消守护）。',
-      code: 'launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.relay-service.app.plist'
-    },
-    {
-      title: '重启',
-      desc: '原地重启 launchd 服务，加载最新代码。',
-      code: 'launchctl kickstart -k gui/$(id -u)/com.relay-service.app'
-    },
-    {
-      title: '状态',
-      desc: '查看 launchd 服务状态、PID 与配置。',
-      code: 'launchctl print gui/$(id -u)/com.relay-service.app'
-    },
-    {
-      title: '更新',
-      desc: '拉取最新代码 → 安装依赖 → 构建前端 → 重启 launchd 服务。',
-      code: 'git pull && npm install && npm run install:web && npm run build:web && launchctl kickstart -k gui/$(id -u)/com.relay-service.app'
     }
   ]
 }

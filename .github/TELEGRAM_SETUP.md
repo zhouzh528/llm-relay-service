@@ -69,14 +69,9 @@
 - feat: 添加 Telegram 自动通知功能
 - fix: 修复某个问题
 
-🐳 Docker 部署:
-docker pull weishaw/claude-relay-service:v1.1.3
-docker pull weishaw/claude-relay-service:latest
-
 🔗 相关链接:
 • GitHub Release
 • 完整更新日志
-• Docker Hub
 
 #ClaudeRelay #Update #v1_1_3
 ```

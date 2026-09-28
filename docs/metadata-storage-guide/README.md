@@ -201,7 +201,6 @@ claude+gemini 且假设全部 hash 存储），请改用上述两条路径。
 | "falling back to Redis backend" | SQLite 打开失败（权限/目录）；查日志定位 `data/metadata.db` 相关错误 |
 | flusher 连续失败 | 查 `logs/`；存储健康面板会标红；一般是 SQLite 磁盘/权限问题 |
 | 多实例部署 | **不支持**；会出现文件锁冲突与数据分裂 |
-| Docker 部署 | `data/` 必须挂 volume，否则容器重建清空 |
 
 ---
 
