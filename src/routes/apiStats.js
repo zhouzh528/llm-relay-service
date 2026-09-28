@@ -12,6 +12,7 @@ const {
   sanitizeErrorMsg
 } = require('../utils/testPayloadHelper')
 const modelsConfig = require('../../config/models')
+const claudeCodeProfile = require('../config/claudeCodeProfile')
 const modelCatalogService = require('../services/modelCatalogService')
 const { getSafeMessage } = require('../utils/errorSanitizer')
 
@@ -1048,7 +1049,7 @@ router.post('/api-key/test', async (req, res) => {
       extraHeaders: {
         'x-api-key': apiKey,
         'x-app': 'claude-code',
-        'anthropic-beta': 'claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14'
+        'anthropic-beta': claudeCodeProfile.getProfile().betas.join(',')
       },
       sanitize: false
     })

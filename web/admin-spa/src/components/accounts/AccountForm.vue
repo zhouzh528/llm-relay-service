@@ -2133,26 +2133,6 @@
                 </label>
               </div>
 
-              <!-- Claude 三方工具伪装开关 -->
-              <div v-if="form.platform === 'claude'" class="mt-4">
-                <label class="flex items-start">
-                  <input
-                    v-model="form.enableThirdPartyToolEmulation"
-                    class="mt-1 text-blue-600 focus:ring-blue-500 dark:border-gray-600 dark:bg-gray-700"
-                    type="checkbox"
-                  />
-                  <div class="ml-3">
-                    <span class="text-sm font-medium text-gray-700 dark:text-gray-300">
-                      启用三方工具伪装（推荐开启）
-                    </span>
-                    <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
-                      针对非真 Claude Code 客户端的请求，自动重写 system
-                      prompt、清洗工具描述指纹、注入 metadata，模拟真实 CLI。关闭后请求按原样转发。
-                    </p>
-                  </div>
-                </label>
-              </div>
-
               <!-- Token 刷新策略（仅 Claude OAuth 账户，创建模式）-->
               <div v-if="form.platform === 'claude'" class="mt-4">
                 <label class="mb-1.5 block text-sm font-medium text-gray-700 dark:text-gray-300">
@@ -3261,26 +3241,6 @@
                       </p>
                     </div>
                   </div>
-                </div>
-              </label>
-            </div>
-
-            <!-- Claude 三方工具伪装开关（编辑模式） -->
-            <div v-if="form.platform === 'claude'" class="mt-4">
-              <label class="flex items-start">
-                <input
-                  v-model="form.enableThirdPartyToolEmulation"
-                  class="mt-1 text-blue-600 focus:ring-blue-500 dark:border-gray-600 dark:bg-gray-700"
-                  type="checkbox"
-                />
-                <div class="ml-3">
-                  <span class="text-sm font-medium text-gray-700 dark:text-gray-300">
-                    启用三方工具伪装（推荐开启）
-                  </span>
-                  <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
-                    针对非真 Claude Code 客户端的请求，自动重写 system
-                    prompt、清洗工具描述指纹、注入 metadata，模拟真实 CLI。关闭后请求按原样转发。
-                  </p>
                 </div>
               </label>
             </div>
@@ -4915,8 +4875,6 @@ const form = ref({
   useUnifiedUserAgent: props.account?.useUnifiedUserAgent || false, // 使用统一Claude Code版本
   useUnifiedClientId: props.account?.useUnifiedClientId || false, // 使用统一的客户端标识
   unifiedClientId: props.account?.unifiedClientId || '', // 统一的客户端标识
-  // 三方工具伪装：默认 true，仅当后端显式返回 false 才关闭（向后兼容老账号）
-  enableThirdPartyToolEmulation: props.account?.enableThirdPartyToolEmulation !== false,
   serialQueueEnabled: (props.account?.maxConcurrency || 0) > 0, // 账户级串行队列开关
   interceptWarmup:
     props.account?.interceptWarmup === true || props.account?.interceptWarmup === 'true', // 拦截预热请求
@@ -5590,7 +5548,6 @@ const buildClaudeAccountData = (tokenInfo, accountName, clientId) => {
     useUnifiedUserAgent: form.value.useUnifiedUserAgent || false,
     useUnifiedClientId: form.value.useUnifiedClientId || false,
     unifiedClientId: clientId,
-    enableThirdPartyToolEmulation: form.value.enableThirdPartyToolEmulation !== false,
     maxConcurrency: form.value.serialQueueEnabled ? 1 : 0,
     axiosRefreshEnabled: !!form.value.axiosRefreshEnabled && !!form.value.axiosCloudflareConfirmed,
     axiosCloudflareConfirmed: !!form.value.axiosCloudflareConfirmed,
@@ -5731,7 +5688,6 @@ const handleOAuthSuccess = async (tokenInfoOrList) => {
       data.useUnifiedUserAgent = form.value.useUnifiedUserAgent || false
       data.useUnifiedClientId = form.value.useUnifiedClientId || false
       data.unifiedClientId = form.value.unifiedClientId || ''
-      data.enableThirdPartyToolEmulation = form.value.enableThirdPartyToolEmulation !== false
       data.maxConcurrency = form.value.serialQueueEnabled ? 1 : 0
       Object.assign(data, buildClaudeTempUnavailablePolicyPayload())
       // 添加订阅类型信息
@@ -6096,7 +6052,6 @@ const createAccount = async () => {
       data.useUnifiedUserAgent = form.value.useUnifiedUserAgent || false
       data.useUnifiedClientId = form.value.useUnifiedClientId || false
       data.unifiedClientId = form.value.unifiedClientId || ''
-      data.enableThirdPartyToolEmulation = form.value.enableThirdPartyToolEmulation !== false
       data.maxConcurrency = form.value.serialQueueEnabled ? 1 : 0
       // axios 兜底门控（双开关同时为 true 才生效）
       data.axiosRefreshEnabled =
@@ -6518,7 +6473,6 @@ const updateAccount = async () => {
       data.useUnifiedUserAgent = form.value.useUnifiedUserAgent || false
       data.useUnifiedClientId = form.value.useUnifiedClientId || false
       data.unifiedClientId = form.value.unifiedClientId || ''
-      data.enableThirdPartyToolEmulation = form.value.enableThirdPartyToolEmulation !== false
       data.maxConcurrency = form.value.serialQueueEnabled ? 1 : 0
       Object.assign(data, buildClaudeTempUnavailablePolicyPayload())
       // axios 双开关 invariant：enabled=true 必须 confirmed=true

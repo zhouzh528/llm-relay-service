@@ -17,6 +17,7 @@ const { getSafeMessage } = require('../utils/errorSanitizer')
 const sessionHelper = require('../utils/sessionHelper')
 const { updateRateLimitCounters } = require('../utils/rateLimitHelper')
 const pricingService = require('../services/pricingService')
+const claudeCodeProfile = require('../config/claudeCodeProfile')
 const { getEffectiveModel } = require('../utils/modelHelper')
 const { createRequestDetailMeta } = require('../utils/requestDetailHelper')
 
@@ -373,8 +374,7 @@ async function handleChatCompletion(req, res, apiKeyData) {
           usageCallback,
           streamTransformer,
           {
-            betaHeader:
-              'oauth-2025-04-20,claude-code-20250219,interleaved-thinking-2025-05-14,fine-grained-tool-streaming-2025-05-14'
+            betaHeader: claudeCodeProfile.getProfile().betas.join(',')
           }
         )
       }

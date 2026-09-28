@@ -622,7 +622,6 @@ router.post('/claude-accounts', authenticateAdmin, async (req, res) => {
       useUnifiedUserAgent,
       useUnifiedClientId,
       unifiedClientId,
-      enableThirdPartyToolEmulation,
       expiresAt,
       extInfo,
       maxConcurrency,
@@ -683,8 +682,6 @@ router.post('/claude-accounts', authenticateAdmin, async (req, res) => {
       useUnifiedUserAgent: useUnifiedUserAgent === true, // 默认为false
       useUnifiedClientId: useUnifiedClientId === true, // 默认为false
       unifiedClientId: unifiedClientId || '', // 统一的客户端标识
-      // 三方工具伪装：默认 true，只有显式 false 才关闭
-      enableThirdPartyToolEmulation: enableThirdPartyToolEmulation !== false,
       expiresAt: expiresAt || null, // 账户订阅到期时间
       extInfo: extInfo || null,
       maxConcurrency: maxConcurrency || 0, // 账户级串行队列：0=使用全局配置，>0=强制启用

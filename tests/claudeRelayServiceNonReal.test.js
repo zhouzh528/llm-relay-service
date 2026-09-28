@@ -50,7 +50,7 @@ const claudeRelayService = require('../src/services/relay/claudeRelayService')
 const metadataUserIdHelper = require('../src/utils/metadataUserIdHelper')
 
 describe('claudeRelayService non-real Claude Code normalization', () => {
-  it('uses Claude Code system array shape without moving custom system text into messages', () => {
+  it('emulation 使用 CC system 形态，并把客户端 system 迁入 messages', () => {
     const body = {
       model: 'claude-sonnet-4-6',
       messages: [{ role: 'user', content: [{ type: 'text', text: 'hello' }] }],
@@ -59,22 +59,30 @@ describe('claudeRelayService non-real Claude Code normalization', () => {
 
     const result = claudeRelayService._processRequestBody(body, null, false)
 
-    expect(result.system).toEqual([
-      { type: 'text', text: claudeRelayService.claudeCodeSystemPrompt },
-      {
-        type: 'text',
-        text: 'Custom system instructions',
-        cache_control: { type: 'ephemeral' }
-      }
-    ])
-    expect(result.messages).toEqual([
-      {
-        role: 'user',
-        content: [{ type: 'text', text: 'hello', cache_control: { type: 'ephemeral' } }]
-      }
-    ])
-    expect(result.max_tokens).toBe(32000)
-    expect(result.temperature).toBe(1)
+    // system = [billing, identity, generic(ttl/scope)]
+    expect(result.system).toHaveLength(3)
+    expect(result.system[0].text).toMatch(
+      /^x-anthropic-billing-header: cc_version=2\.1\.280\.[0-9a-f]{3}; cc_entrypoint=cli;/
+    )
+    expect(result.system[0].text).not.toContain('cch=')
+    expect(result.system[1]).toEqual({
+      type: 'text',
+      text: claudeRelayService.claudeCodeSystemPrompt
+    })
+    expect(result.system[2].cache_control).toEqual({
+      type: 'ephemeral',
+      ttl: '1h',
+      scope: 'global'
+    })
+
+    // 客户端 system 迁入 messages（role: system），不再留在 system 字段
+    expect(result.messages[0].role).toBe('system')
+    expect(result.messages[0].content[0].text).toBe('Custom system instructions')
+    const userMsg = result.messages.find((m) => m.role === 'user')
+    expect(userMsg.content[0].text).toBe('hello')
+
+    expect(result.max_tokens).toBe(128000)
+    expect(result.temperature).toBeUndefined()
     expect(metadataUserIdHelper.isValid(result.metadata.user_id)).toBe(true)
   })
 
@@ -97,16 +105,18 @@ describe('claudeRelayService non-real Claude Code normalization', () => {
 
     const result = claudeRelayService._processRequestBody(body, null, false)
 
-    expect(result.system).toEqual([
-      {
-        type: 'text',
-        text: claudeRelayService.claudeCodeSystemPrompt,
-        cache_control: { type: 'ephemeral' }
-      },
-      { type: 'text', text: 'Generate a concise title.' }
-    ])
+    // 客户端 billing 标记被剥离，服务注入自己的 billing header
+    const systemText = result.system.map((b) => b.text).join('\n')
+    expect(systemText).not.toContain('cc_version=2.1.140')
+    expect(systemText).toContain('x-anthropic-billing-header: cc_version=2.1.280.')
+    expect(result.system[1].text).toBe(claudeRelayService.claudeCodeSystemPrompt)
+
+    // 客户端自定义指令随 system 一起迁入 messages
+    expect(JSON.stringify(result.messages)).toContain('Generate a concise title.')
+
     expect(result.max_tokens).toBe(1024)
-    expect(result.temperature).toBe(0.2)
+    // 2.1.280 顶层不发送 temperature
+    expect(result.temperature).toBeUndefined()
   })
 
   it('rewrites the canonical OpenCode identity sentence before forwarding', () => {
@@ -118,13 +128,10 @@ describe('claudeRelayService non-real Claude Code normalization', () => {
 
     const result = claudeRelayService._processRequestBody(body, null, false)
 
-    expect(result.system).toEqual([
-      {
-        type: 'text',
-        text: claudeRelayService.claudeCodeSystemPrompt,
-        cache_control: { type: 'ephemeral' }
-      }
-    ])
+    // OpenCode 身份句必须被改写为 CC 身份，且不得随迁入 messages 泄漏到上游
+    expect(result.system[1].text).toBe(claudeRelayService.claudeCodeSystemPrompt)
+    expect(JSON.stringify(result.messages)).not.toContain('OpenCode')
+    expect(JSON.stringify(result.system)).not.toContain('OpenCode')
   })
 
   it('cleans fixed descriptions from known non-real Claude Code tools', () => {
@@ -174,7 +181,7 @@ describe('claudeRelayService non-real Claude Code normalization', () => {
     expect(result.tools[4].description).toBe('Call the internal business workflow.')
   })
 
-  it('does not clean fixed tool descriptions for actual Claude Code requests', () => {
+  it('统一化后：真 Claude Code 客户端请求同样被归一化（不再有例外）', () => {
     const body = {
       model: 'claude-sonnet-4-6',
       messages: [{ role: 'user', content: [{ type: 'text', text: 'hello' }] }],
@@ -191,9 +198,9 @@ describe('claudeRelayService non-real Claude Code normalization', () => {
 
     const result = claudeRelayService._processRequestBody(body, null, true)
 
-    expect(result.tools[0].description).toBe(
-      'Modify existing files (REPLACES apply_patch). Requires a prior Read in this session.'
-    )
+    // 与第三方客户端一致：工具描述被清洗，system 被替换为中转合成形态（system[0] 为 billing header）
+    expect(result.tools[0].description).toBe('Modify existing files by replacing exact text.')
+    expect(result.system[0].text).toMatch(/^x-anthropic-billing-header:/)
   })
 
   it('applies sub2api-style static tool-name mimicry without rewriting history', () => {

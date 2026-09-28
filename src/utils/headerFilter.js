@@ -5,6 +5,8 @@
  * 避免触发上游 API（如 88code）的安全检查
  */
 
+const claudeCodeProfile = require('../config/claudeCodeProfile')
+
 // Cloudflare CDN headers（橙色云代理模式会添加这些）
 const cdnHeaders = [
   'x-real-ip',
@@ -101,18 +103,12 @@ function filterForClaude(headers, options = {}) {
   filtered['x-claude-code-session-id'] = require('crypto').randomUUID()
 
   // 3. 确保 anthropic-beta 包含完整的 Claude Code CLI beta flags
+  //    单一事实来源：src/config/claudeCodeProfile.js（此前此处硬编码了 v2.1.143 的 6 个 flag，
+  //    与 claudeRelayService 的列表不一致，已统一）
   const existingBeta = filtered['anthropic-beta'] || ''
   const claudeCodeBeta = 'claude-code-20250219'
   if (!existingBeta.includes(claudeCodeBeta)) {
-    // 完整的 Claude CLI v2.1.143 beta flags 列表
-    const betaFlags = [
-      claudeCodeBeta,
-      'context-1m-2025-08-07',
-      'interleaved-thinking-2025-05-14',
-      'context-management-2025-06-27',
-      'prompt-caching-scope-2026-01-05',
-      'effort-2025-11-24'
-    ]
+    const betaFlags = [...claudeCodeProfile.getProfile().betas]
     if (existingBeta) {
       // 合并已有的 beta flags（去重）
       const existing = existingBeta.split(',').map((s) => s.trim())

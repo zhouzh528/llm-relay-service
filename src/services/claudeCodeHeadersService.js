@@ -5,6 +5,7 @@
 
 const redis = require('../models/redis')
 const logger = require('../utils/logger')
+const claudeCodeProfile = require('../config/claudeCodeProfile')
 const {
   getCachedConfig,
   setCachedConfig,
@@ -13,6 +14,7 @@ const {
 
 class ClaudeCodeHeadersService {
   constructor() {
+    // 版本与 UA 来自 claudeCodeProfile（唯一事实来源），不再就地硬编码
     this.defaultHeaders = {
       'x-stainless-retry-count': '0',
       'x-stainless-timeout': '600',
@@ -24,7 +26,7 @@ class ClaudeCodeHeadersService {
       'x-stainless-runtime-version': 'v26.3.0',
       'anthropic-dangerous-direct-browser-access': 'true',
       'x-app': 'cli',
-      'user-agent': 'claude-cli/2.1.280 (external, cli)'
+      'user-agent': claudeCodeProfile.buildUserAgent()
     }
 
     // 需要捕获的 Claude Code 特定 headers
@@ -39,7 +41,7 @@ class ClaudeCodeHeadersService {
       'x-stainless-runtime-version',
       'anthropic-dangerous-direct-browser-access',
       'x-app',
-      'user-agent',
+      'user-agent'
       // 注意：不捕获 accept-encoding / accept-language / sec-fetch-mode（真 CLI 不带）
     ]
 

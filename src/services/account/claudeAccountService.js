@@ -822,7 +822,6 @@ class ClaudeAccountService {
       useUnifiedUserAgent = false, // 是否使用统一Claude Code版本的User-Agent
       useUnifiedClientId = false, // 是否使用统一的客户端标识
       unifiedClientId = '', // 统一的客户端标识
-      enableThirdPartyToolEmulation = true, // 是否启用三方工具伪装（仅对非真 Claude Code 客户端生效，默认开启以保持向后兼容）
       expiresAt = null, // 账户订阅到期时间
       extInfo = null, // 额外扩展信息
       maxConcurrency = 0, // 账户级用户消息串行队列：0=使用全局配置，>0=强制启用串行
@@ -872,7 +871,6 @@ class ClaudeAccountService {
         useUnifiedUserAgent: useUnifiedUserAgent.toString(), // 是否使用统一Claude Code版本的User-Agent
         useUnifiedClientId: useUnifiedClientId.toString(), // 是否使用统一的客户端标识
         unifiedClientId: unifiedClientId || '', // 统一的客户端标识
-        enableThirdPartyToolEmulation: enableThirdPartyToolEmulation.toString(), // 是否启用三方工具伪装
         // 优先使用手动设置的订阅信息，否则使用OAuth数据中的，否则默认为空
         subscriptionInfo: subscriptionInfo
           ? JSON.stringify(subscriptionInfo)
@@ -988,7 +986,6 @@ class ClaudeAccountService {
       useUnifiedUserAgent,
       useUnifiedClientId,
       unifiedClientId,
-      enableThirdPartyToolEmulation,
       extInfo: normalizedExtInfo,
       interceptWarmup,
       disableTempUnavailable: normalizedTempUnavailablePolicy.disableTempUnavailable,
@@ -1473,8 +1470,6 @@ class ClaudeAccountService {
             // 添加统一客户端标识设置
             useUnifiedClientId: account.useUnifiedClientId === 'true', // 默认为false
             unifiedClientId: account.unifiedClientId || '', // 统一的客户端标识
-            // 三方工具伪装开关：默认 true，仅显式 'false' 才关闭（向后兼容）
-            enableThirdPartyToolEmulation: account.enableThirdPartyToolEmulation !== 'false',
             // 添加停止原因
             stoppedReason: account.stoppedReason || null,
             // 扩展信息
@@ -1584,7 +1579,6 @@ class ClaudeAccountService {
         'useUnifiedUserAgent',
         'useUnifiedClientId',
         'unifiedClientId',
-        'enableThirdPartyToolEmulation',
         'subscriptionExpiresAt',
         'extInfo',
         'maxConcurrency',
@@ -1632,9 +1626,6 @@ class ClaudeAccountService {
           } else if (field === 'disableTempUnavailable') {
             updatedData[field] = parseBooleanLike(value) ? 'true' : 'false'
           } else if (field === 'axiosRefreshEnabled' || field === 'axiosCloudflareConfirmed') {
-            updatedData[field] = parseBooleanLike(value) ? 'true' : 'false'
-          } else if (field === 'enableThirdPartyToolEmulation') {
-            // 默认 true 语义：只有显式 false 才存 'false'，其它值都视为开启
             updatedData[field] = parseBooleanLike(value) ? 'true' : 'false'
           } else if (
             field === 'tempUnavailable503TtlSeconds' ||

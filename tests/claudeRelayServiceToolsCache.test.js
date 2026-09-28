@@ -86,7 +86,12 @@ function makeBody({ tools = [], extras = {} } = {}) {
 describe('_hasMessagesCacheControl', () => {
   it('messages 内有 cache_control 时返回 true', () => {
     const body = {
-      messages: [{ role: 'user', content: [{ type: 'text', text: 'q', cache_control: { type: 'ephemeral' } }] }]
+      messages: [
+        {
+          role: 'user',
+          content: [{ type: 'text', text: 'q', cache_control: { type: 'ephemeral' } }]
+        }
+      ]
     }
     expect(claudeRelayService._hasMessagesCacheControl(body)).toBe(true)
   })
@@ -208,7 +213,12 @@ describe('_injectClaudeCodeStyleCacheControl with tools', () => {
     // messages 已经有锚点时，_hasMessagesCacheControl 命中，跳过注入
     const body = {
       system: [{ type: 'text', text: 'sys', cache_control: { type: 'ephemeral' } }],
-      messages: [{ role: 'user', content: [{ type: 'text', text: 'q', cache_control: { type: 'ephemeral' } }] }],
+      messages: [
+        {
+          role: 'user',
+          content: [{ type: 'text', text: 'q', cache_control: { type: 'ephemeral' } }]
+        }
+      ],
       tools: makeTools(2)
     }
     claudeRelayService._injectClaudeCodeStyleCacheControl(body)
@@ -358,7 +368,7 @@ describe('_processRequestBody — tools cache_control injection (non-real Claude
     expect(result.tools[0].cache_control).toBeUndefined()
   })
 
-  it('真 Claude Code 请求（isRealClaudeCodeOverride=true）不应注入 tools cache_control', () => {
+  it('统一化后：真 Claude Code 客户端请求同样注入 tools cache_control', () => {
     const body = {
       model: 'claude-sonnet-4-6',
       messages: [{ role: 'user', content: [{ type: 'text', text: 'hello' }] }],
@@ -367,8 +377,8 @@ describe('_processRequestBody — tools cache_control injection (non-real Claude
     }
     const result = claudeRelayService._processRequestBody(body, null, true)
 
-    // 真 Claude Code 链路，relay 不主动注入（由客户端自己决定）
-    expect(result.tools[2].cache_control).toBeUndefined()
+    // 统一化：所有请求走同一路径，tools 末尾同样被注入
+    expect(result.tools[2].cache_control).toEqual({ type: 'ephemeral' })
   })
 
   it('非真 Claude Code 请求无 tools 时其他行为不变', () => {
