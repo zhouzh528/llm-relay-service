@@ -139,13 +139,13 @@ macOS 用户可使用 `install-macos.sh`。脚本会自动安装/检查 Homebrew
 ### 一行拉起
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/dipinllx-source/relay-service/main/install.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/zhouzh528/llm-relay-service/main/install.sh | sudo bash
 ```
 
 或先下载再执行（方便查看/自定义参数）：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/dipinllx-source/relay-service/main/install.sh -o install.sh
+curl -fsSL https://raw.githubusercontent.com/zhouzh528/llm-relay-service/main/install.sh -o install.sh
 sudo bash install.sh                          # 默认: /opt/relay-service, 端口 3000
 sudo bash install.sh /opt/relay-service 8080  # 自定义安装目录和端口
 ```
@@ -155,13 +155,13 @@ sudo bash install.sh /opt/relay-service 8080  # 自定义安装目录和端口
 > 请使用普通用户运行，不要加 `sudo`。默认安装到 `~/relay-service`，端口 `3000`。
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/dipinllx-source/relay-service/main/install-macos.sh | bash
+curl -fsSL https://raw.githubusercontent.com/zhouzh528/llm-relay-service/main/install-macos.sh | bash
 ```
 
 或先下载再执行：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/dipinllx-source/relay-service/main/install-macos.sh -o install-macos.sh
+curl -fsSL https://raw.githubusercontent.com/zhouzh528/llm-relay-service/main/install-macos.sh -o install-macos.sh
 bash install-macos.sh                         # 默认: ~/relay-service, 端口 3000
 bash install-macos.sh "$HOME/relay-service" 8080  # 自定义安装目录和端口
 ```
@@ -193,9 +193,16 @@ cat ~/relay-service/data/init.json                       # 首次管理员凭据
 
 ### 升级
 
+安装脚本会把代码切到最新的正式发布 tag（`vX.Y.Z`）。之后推荐直接在管理台升级：账户菜单 → **检查更新**，确认变更清单后点击升级。服务端会拉取目标 tag、按需安装依赖和构建前端，再由 systemd 以新代码重新拉起；任一步失败都会回退，服务继续以旧版本运行。
+
+> 只有推送到仓库的 `vX.Y.Z` tag 才会被识别为新版本，`main` 上未打 tag 的提交不会触发升级提示；`-rc` 等预发布 tag 默认也不提示。
+
+手动升级（`<vX.Y.Z>` 替换为目标版本）：
+
 ```bash
 cd /opt/relay-service
-git pull
+git fetch --tags origin
+git checkout --detach refs/tags/<vX.Y.Z>
 npm install --omit=dev
 npm run build:web
 systemctl restart relay-service
@@ -249,8 +256,8 @@ sudo systemctl start redis
 
 ```bash
 # 下载项目
-git clone https://github.com/Wei-Shaw/claude-relay-service.git
-cd claude-relay-service
+git clone https://github.com/zhouzh528/llm-relay-service.git
+cd llm-relay-service
 
 # 安装依赖
 npm install
@@ -376,8 +383,8 @@ export ANTHROPIC_API_KEY=cr_你的key
 项目根目录已提供 `docker-compose.yml`，克隆仓库后直接启动即可：
 
 ```bash
-git clone https://github.com/Wei-Shaw/claude-relay-service.git
-cd claude-relay-service
+git clone https://github.com/zhouzh528/llm-relay-service.git
+cd llm-relay-service
 cp .env.example .env   # 编辑 JWT_SECRET / ENCRYPTION_KEY 等必填项
 docker-compose up -d
 ```
@@ -826,7 +833,7 @@ systemctl restart relay-app                     # 再启动，然后才导入备
 
 ```bash
 # 1. 进入项目目录
-cd claude-relay-service
+cd llm-relay-service
 
 # 2. 拉取最新代码
 git pull origin main

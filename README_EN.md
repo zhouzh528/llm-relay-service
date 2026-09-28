@@ -141,13 +141,13 @@ An `install.sh` script is provided at the repo root for **Ubuntu / Debian / Cent
 ### One-liner
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/dipinllx-source/relay-service/main/install.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/zhouzh528/llm-relay-service/main/install.sh | sudo bash
 ```
 
 Or download first (to review / pass custom args):
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/dipinllx-source/relay-service/main/install.sh -o install.sh
+curl -fsSL https://raw.githubusercontent.com/zhouzh528/llm-relay-service/main/install.sh -o install.sh
 sudo bash install.sh                          # default: /opt/relay-service, port 3000
 sudo bash install.sh /opt/relay-service 8080  # custom install dir & port
 ```
@@ -170,9 +170,16 @@ Admin panel: `http://<server-ip>:<port>/admin-next/`
 
 ### Upgrade
 
+The installer checks out the latest release tag (`vX.Y.Z`). After that, upgrading from the admin panel is recommended: account menu → **检查更新 (Check for updates)**, review the changelog, then click upgrade. The server fetches the target tag, installs dependencies / rebuilds the web UI only when needed, and exits so systemd restarts it with the new code; if any step fails it rolls back and keeps running the old version.
+
+> Only `vX.Y.Z` tags pushed to the repository are recognized as new releases — untagged commits on `main` never trigger an upgrade prompt, and prerelease tags such as `-rc` are not prompted by default.
+
+Manual upgrade (replace `<vX.Y.Z>` with the target version):
+
 ```bash
 cd /opt/relay-service
-git pull
+git fetch --tags origin
+git checkout --detach refs/tags/<vX.Y.Z>
 npm install --omit=dev
 npm run build:web
 systemctl restart relay-service
@@ -224,8 +231,8 @@ sudo systemctl start redis
 
 ```bash
 # Download project
-git clone https://github.com/Wei-Shaw/claude-relay-service.git
-cd claude-relay-service
+git clone https://github.com/zhouzh528/llm-relay-service.git
+cd llm-relay-service
 
 # Install dependencies
 npm install
@@ -445,7 +452,7 @@ When a new version is released, follow these steps to upgrade the service:
 
 ```bash
 # 1. Navigate to project directory
-cd claude-relay-service
+cd llm-relay-service
 
 # 2. Pull latest code
 git pull origin main

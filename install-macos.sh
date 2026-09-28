@@ -15,7 +15,7 @@ PORT="${2:-3000}"
 NODE_MAJOR=20
 SERVICE_LABEL="com.relay-service.app"
 REDIS_LABEL="com.relay-service.redis"
-REPO_URL="https://github.com/dipinllx-source/relay-service.git"
+REPO_URL="${REPO_URL:-https://github.com/zhouzh528/llm-relay-service.git}"  # 可用环境变量覆盖
 
 LAUNCH_AGENT_DIR="$HOME/Library/LaunchAgents"
 SUPPORT_DIR="$HOME/Library/Application Support/Relay Service"
@@ -437,14 +437,29 @@ else
   setup_redis_existing
 fi
 
+# 切到最新的正式发布 tag (vX.Y.Z, 不含 -rc 等预发布), 与管理台一键升级的版本来源保持一致.
+# 远端没有任何发布 tag 时停留在默认分支.
+checkout_latest_release() {
+  local dir=$1 tag
+  git -C "$dir" fetch --tags --force --quiet origin || die "git fetch 失败: $dir"
+  tag=$(git -C "$dir" tag -l 'v*' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -n1 || true)
+  if [[ -z $tag ]]; then
+    warn "远端没有发布 tag (vX.Y.Z), 停留在默认分支"
+    return 0
+  fi
+  git -C "$dir" checkout --quiet --detach "refs/tags/${tag}" \
+    || die "切换到 ${tag} 失败 (工作区可能有本地修改, 请先处理: git -C $dir status)"
+  ok "代码版本: ${tag}"
+}
+
 if [[ -d "$INSTALL_DIR/.git" ]]; then
   log "更新源码"
-  git -C "$INSTALL_DIR" pull --ff-only
 else
   log "克隆仓库到 $INSTALL_DIR"
   mkdir -p "$(dirname "$INSTALL_DIR")"
   git clone "$REPO_URL" "$INSTALL_DIR"
 fi
+checkout_latest_release "$INSTALL_DIR"
 
 cd "$INSTALL_DIR"
 [[ -f config/config.js ]] || cp config/config.example.js config/config.js
@@ -548,9 +563,10 @@ if [[ $REDIS_MODE == new ]]; then
   echo "    ${REDIS_CONF}"
 fi
 echo
-echo "  升级:"
+echo "  升级 (<vX.Y.Z> 替换为目标版本, 只识别发布 tag):"
 echo "    cd '${INSTALL_DIR}'"
-echo "    git pull"
+echo "    git fetch --tags origin"
+echo "    git checkout --detach refs/tags/<vX.Y.Z>"
 echo "    npm install --omit=dev"
 echo "    npm run build:web"
 echo "    launchctl kickstart -k gui/${UID}/${SERVICE_LABEL}"
