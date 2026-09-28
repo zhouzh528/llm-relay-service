@@ -95,7 +95,11 @@ describe('requestDetailService', () => {
       21600
     )
     const storedPayload = JSON.parse(multi.set.mock.calls[0][1])
-    expect(storedPayload.requestBodySnapshot.apiKey).toContain('***')
+    // 凭据全量遮蔽、对话正文只留长度（与访问日志同一套规则）
+    expect(storedPayload.requestBodySnapshot.apiKey).toBe('[REDACTED]')
+    expect(storedPayload.requestBodySnapshot.prompt).toBe('[redacted 5 chars]')
+    expect(storedPayload.requestBodySnapshot.reasoning).toEqual({ effort: 'medium' })
+    expect(multi.set.mock.calls[0][1]).not.toContain('super-secret')
     expect(storedPayload.endpoint).toBe('/openai/v1/responses')
     expect(storedPayload.reasoningDisplay).toBe('medium')
     expect(storedPayload.reasoningSource).toBe('reasoning.effort')

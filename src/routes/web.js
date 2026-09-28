@@ -6,6 +6,10 @@ const fs = require('fs')
 const redis = require('../models/redis')
 const logger = require('../utils/logger')
 const config = require('../../config/config')
+
+// redis.setSession 的 ttl 单位是秒，而 adminSessionTimeout 配置单位是毫秒（响应里的 expiresIn 也按毫秒给前端）。
+// 之前直接传毫秒值，导致会话 TTL 被放大 1000 倍（24h → ~1000 天），泄露的 token 长期有效。
+const ADMIN_SESSION_TTL_SECONDS = Math.max(1, Math.ceil(config.security.adminSessionTimeout / 1000))
 const {
   loginRateLimit,
   penalizeLogin,
@@ -130,7 +134,7 @@ router.post('/auth/login', loginRateLimit, async (req, res) => {
       lastActivity: new Date().toISOString()
     }
 
-    await redis.setSession(sessionId, sessionData, config.security.adminSessionTimeout)
+    await redis.setSession(sessionId, sessionData, ADMIN_SESSION_TTL_SECONDS)
 
     // 不再更新 Redis 中的最后登录时间，因为 Redis 只是缓存
     // init.json 是唯一真实数据源
@@ -434,7 +438,7 @@ router.post('/auth/refresh', async (req, res) => {
 
     // 更新最后活动时间
     sessionData.lastActivity = new Date().toISOString()
-    await redis.setSession(token, sessionData, config.security.adminSessionTimeout)
+    await redis.setSession(token, sessionData, ADMIN_SESSION_TTL_SECONDS)
 
     return res.json({
       success: true,

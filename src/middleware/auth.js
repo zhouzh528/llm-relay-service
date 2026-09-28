@@ -13,6 +13,13 @@ const { isClaudeFamilyModel } = require('../utils/modelHelper')
 // 访问日志的请求体脱敏：复用既有实现，勿另写一份 —— 两套敏感字段黑名单必然漂移。
 // SENSITIVE_KEY_PATTERN 为无锚点子串匹配且含 password，currentPassword / newPassword 天然覆盖。
 const { sanitizeRequestBodySnapshot } = require('../utils/requestDetailHelper')
+// 访问日志落盘前的二次脱敏：对话正文只留长度、凭据（登录 token / API key 等）全量遮蔽
+const {
+  stripConversationContent,
+  redactSecrets,
+  redactQueryString,
+  buildLoggableResponseBody
+} = require('../utils/accessLogRedactor')
 
 // 密码族字段在访问日志中一律全量遮蔽。
 // requestDetailHelper 的 maskSensitiveValue 会保留首尾各 3 位（为便于排查 token / api key），
@@ -43,7 +50,9 @@ function buildLoggableRequestBody(body) {
   if (!body || Object.keys(body).length === 0) {
     return undefined
   }
-  return redactPasswordFields(sanitizeRequestBodySnapshot(body))
+  return redactSecrets(
+    redactPasswordFields(sanitizeRequestBodySnapshot(stripConversationContent(body)))
+  )
 }
 
 // 工具函数
@@ -1853,12 +1862,12 @@ const requestLogger = (req, res, next) => {
     // 查询参数（GET 请求且有查询参数时单独显示）
     const queryIdx = req.originalUrl.indexOf('?')
     if (queryIdx > -1) {
-      meta.query = req.originalUrl.substring(queryIdx + 1)
+      meta.query = redactQueryString(req.originalUrl.substring(queryIdx + 1))
     }
 
     // 响应体
     if (res._responseBody) {
-      meta.res = res._responseBody
+      meta.res = buildLoggableResponseBody(res._responseBody)
     }
 
     // API Key 信息（合并到同一条日志）

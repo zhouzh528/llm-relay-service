@@ -17,6 +17,8 @@ const {
   extractRequestReasoningInfo,
   resolveRequestDetailReasoning
 } = require('../utils/requestDetailHelper')
+// 请求体快照落 Redis 前去掉对话正文（只留结构与长度）并遮蔽凭据，与访问日志同一套规则
+const { stripConversationContent, redactSecrets } = require('../utils/accessLogRedactor')
 
 const REQUEST_DETAIL_ITEM_PREFIX = 'request_detail:item:'
 const REQUEST_DETAIL_DAY_INDEX_PREFIX = 'request_detail:index:day:'
@@ -424,7 +426,9 @@ class RequestDetailService {
     }
 
     if (options.bodyPreviewEnabled && requestBodySource !== undefined) {
-      normalized.requestBodySnapshot = sanitizeRequestBodySnapshot(requestBodySource)
+      normalized.requestBodySnapshot = redactSecrets(
+        sanitizeRequestBodySnapshot(stripConversationContent(requestBodySource))
+      )
     }
 
     return normalized
