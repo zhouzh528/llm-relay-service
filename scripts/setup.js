@@ -91,9 +91,17 @@ async function setup() {
     console.log('   npm run cli admin      - 管理员CLI工具\n')
 
     console.log(chalk.blue('🌐 访问地址：\n'))
-    console.log(`   Web管理界面: http://localhost:${config.server.port}/web`)
-    console.log(`   API端点:     http://localhost:${config.server.port}/api/v1/messages`)
-    console.log(`   健康检查:    http://localhost:${config.server.port}/health\n`)
+    // 有 Nginx 分端口配置时优先展示对外入口（应用自身只绑回环地址）
+    const ngx = config.nginx
+    if (ngx && ngx.publicPort && ngx.adminPort) {
+      console.log(`   管理台:   http://localhost:${ngx.adminPort}/admin-next/   (Nginx 管理端口)`)
+      console.log(`   API端点:  http://localhost:${ngx.publicPort}/api/v1/messages   (Nginx 对外端口)`)
+      console.log(`   健康检查: http://localhost:${ngx.publicPort}/health\n`)
+    } else {
+      console.log(`   管理台:   http://localhost:${config.server.port}/admin-next/`)
+      console.log(`   API端点:  http://localhost:${config.server.port}/api/v1/messages`)
+      console.log(`   健康检查: http://localhost:${config.server.port}/health\n`)
+    }
   } catch (error) {
     spinner.fail('初始化设置失败')
     console.error(chalk.red('❌ 错误:'), error.message)

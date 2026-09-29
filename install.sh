@@ -233,10 +233,22 @@ pkg_install git curl openssl ca-certificates build-essential 2>/dev/null \
   || pkg_install git curl openssl ca-certificates gcc-c++ make
 
 # ---------- 2. Node.js ----------
+# ⚠️ 不能用 `command -v node` 判断：fnm / nvm 等用户级 Node 会出现在 PATH 中，
+# 但 systemd 服务（unit 用绝对路径启动，且看不到用户级 PATH）用不了它们，
+# 结果服务以 203/EXEC 启动失败、安装卡在健康检查 5 分钟后报错。
+# 因此只认「系统路径」下的 node，并把它固定为后续 unit 与 npm 的唯一来源。
+NODE_BIN=""
+for c in /usr/bin/node /usr/local/bin/node; do
+  if [[ -x $c ]]; then NODE_BIN=$c; break; fi
+done
+
 NEED_NODE=1
-if command -v node >/dev/null 2>&1; then
-  CUR=$(node -v | sed 's/v\([0-9]*\).*/\1/')
-  (( CUR >= 18 )) && NEED_NODE=0 && ok "Node 已存在: $(node -v)"
+if [[ -n $NODE_BIN ]]; then
+  CUR=$("$NODE_BIN" -v | sed 's/v\([0-9]*\).*/\1/')
+  if (( CUR >= 18 )); then
+    NEED_NODE=0
+    ok "Node 已存在: $("$NODE_BIN" -v) ($NODE_BIN)"
+  fi
 fi
 if (( NEED_NODE )); then
   log "安装 Node.js ${NODE_MAJOR}.x (NodeSource)"
@@ -247,8 +259,16 @@ if (( NEED_NODE )); then
     curl -fsSL https://rpm.nodesource.com/setup_${NODE_MAJOR}.x | bash -
     $PKG install -y nodejs
   fi
-  ok "Node $(node -v)"
+  NODE_BIN=/usr/bin/node
+  [[ -x $NODE_BIN ]] || die "Node 安装完成但 $NODE_BIN 不存在"
+  ok "Node $("$NODE_BIN" -v)"
 fi
+
+# npm 必须与选中的 node 配套：用 PATH 里的其它 npm 会把原生模块（better-sqlite3 等）
+# 编成另一个 ABI，运行期崩溃。
+NPM_BIN="$(dirname "$NODE_BIN")/npm"
+[[ -x $NPM_BIN ]] || die "未找到与 $NODE_BIN 配套的 npm：$NPM_BIN"
+ok "使用 npm: $NPM_BIN"
 
 # ---------- 2.5. Claude Code CLI ----------
 # Token 刷新依赖 `claude -p`，binary 必须落在 systemd 服务的 PATH 内
@@ -261,8 +281,8 @@ elif command -v claude >/dev/null 2>&1 && [[ $(command -v claude) == /usr/bin/cl
 else
   log "安装 Claude Code CLI (@anthropic-ai/claude-code → /usr/local)"
   # env -i 避免 NVM 注入；显式 PATH + prefix 锁定到系统位置
-  if env -i PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/bin HOME=/root \
-      /usr/bin/npm i -g --prefix=/usr/local @anthropic-ai/claude-code 2>&1 | tail -5; then
+  if env -i PATH="$(dirname "$NPM_BIN"):/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/bin" HOME=/root \
+      "$NPM_BIN" i -g --prefix=/usr/local @anthropic-ai/claude-code 2>&1 | tail -5; then
     if [[ -x $CLAUDE_SYSTEM_PATH ]]; then
       ok "Claude Code: $CLAUDE_SYSTEM_PATH ($("$CLAUDE_SYSTEM_PATH" --version 2>/dev/null | head -1))"
     else
@@ -369,6 +389,12 @@ else
   run_as_svc() { sudo -u "$SERVICE_USER" bash -lc "$*"; }
 fi
 
+# 用「选定的 node/npm」执行 npm：把其 bin 目录放到 PATH 最前，避免 PATH 中的
+# 其它 Node（fnm/nvm）参与原生模块编译或前端构建，造成 ABI/版本错配。
+run_npm() {
+  run_as_svc "export PATH='$(dirname "$NPM_BIN")':\$PATH; cd '$INSTALL_DIR' && '$NPM_BIN' $*"
+}
+
 # 切到最新的正式发布 tag (vX.Y.Z, 不含 -rc 等预发布), 与管理台一键升级的版本来源保持一致.
 # 远端没有任何发布 tag 时停留在默认分支.
 checkout_latest_release() {
@@ -462,20 +488,20 @@ chown -R "$SERVICE_USER:$SERVICE_USER" "$INSTALL_DIR"
 
 # ---------- 6. 依赖 + 前端构建 + 管理员初始化 ----------
 log "安装后端依赖 (可能需要几分钟)"
-run_as_svc "cd '$INSTALL_DIR' && npm install --omit=dev --no-audit --no-fund"
+run_npm install --omit=dev --no-audit --no-fund
 log "安装并构建前端 SPA"
 # --silent 会把 prettier / ESLint 的报错藏起来, 出错时用户看不到任何线索,
 # 只能手动重跑才知道错在哪. 这里改成: 全量输出重定向到日志, 失败时 tail
 # 出来直接展示错误; 成功则静默.
 BUILD_LOG=$(mktemp /tmp/relay-install-build.XXXXXX.log)
-if ! run_as_svc "cd '$INSTALL_DIR' && npm run install:web && npm run build:web" \
+if ! { run_npm run install:web && run_npm run build:web; } \
       >"$BUILD_LOG" 2>&1; then
   warn "前端构建失败, 最近 60 行输出 ↓"
   echo "----------------------------------------------------------------" >&2
   tail -n 60 "$BUILD_LOG" >&2
   echo "----------------------------------------------------------------" >&2
   echo "  完整日志: $BUILD_LOG" >&2
-  echo "  修复后重跑: cd $INSTALL_DIR && npm run build:web" >&2
+  echo "  修复后重跑: cd $INSTALL_DIR && '$NPM_BIN' run build:web" >&2
   die "前端构建失败 — /admin-next/ 需要 dist 才能工作"
 fi
 rm -f "$BUILD_LOG"
@@ -484,7 +510,7 @@ rm -f "$BUILD_LOG"
 [[ -f "${INSTALL_DIR}/web/admin-spa/dist/index.html" ]] \
   || die "web/admin-spa/dist/index.html 缺失, 前端构建不完整, 中止安装"
 log "运行 setup 初始化管理员凭据"
-run_as_svc "cd '$INSTALL_DIR' && npm run setup" || warn "setup 异常, 首次启动时会重试"
+run_npm run setup || warn "setup 异常, 首次启动时会重试"
 
 # ---------- 7. systemd 单元 ----------
 log "写入 systemd 服务 ${SERVICE_NAME}"
@@ -503,7 +529,7 @@ EnvironmentFile=${INSTALL_DIR}/.env
 # 显式 PATH，确保 claude CLI（系统 npm 全局装到 /usr/local/bin 或 /usr/bin）可被 spawn
 # .env 内可用 CLAUDE_BIN=/path/to/claude 显式指定绝对路径覆盖此查找
 Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/bin
-ExecStart=/usr/bin/node ${INSTALL_DIR}/src/app.js
+ExecStart=${NODE_BIN} ${INSTALL_DIR}/src/app.js
 Restart=always
 RestartSec=5
 StandardOutput=append:${INSTALL_DIR}/logs/stdout.log
@@ -688,13 +714,13 @@ echo "  手动升级 (<vX.Y.Z> 替换为目标版本):"
 if [[ $SERVICE_USER == root ]]; then
   echo "    cd ${INSTALL_DIR} && git fetch --tags origin"
   echo "    git checkout --detach refs/tags/<vX.Y.Z>"
-  echo "    npm install --omit=dev"
-  echo "    npm run build:web"
+  echo "    ${NPM_BIN} install --omit=dev"
+  echo "    ${NPM_BIN} run build:web"
 else
   echo "    cd ${INSTALL_DIR} && sudo -u ${SERVICE_USER} git fetch --tags origin"
   echo "    sudo -u ${SERVICE_USER} git checkout --detach refs/tags/<vX.Y.Z>"
-  echo "    sudo -u ${SERVICE_USER} npm install --omit=dev"
-  echo "    sudo -u ${SERVICE_USER} npm run build:web"
+  echo "    sudo -u ${SERVICE_USER} ${NPM_BIN} install --omit=dev"
+  echo "    sudo -u ${SERVICE_USER} ${NPM_BIN} run build:web"
 fi
 echo "    systemctl restart ${SERVICE_NAME}"
 echo "════════════════════════════════════════════════════════"

@@ -549,10 +549,10 @@ EOF
     
     echo -e "\n${GREEN}服务已成功安装并启动！${NC}"
     echo -e "\n${YELLOW}访问地址：${NC}"
-    echo -e "  本地 Web: ${GREEN}http://localhost:$APP_PORT/web${NC}"
+    echo -e "  本地 Web: ${GREEN}http://localhost:$APP_PORT/admin-next/${NC}"
     echo -e "  本地 API: ${GREEN}http://localhost:$APP_PORT/api/v1${NC}"
     if [ "$public_ip" != "localhost" ]; then
-        echo -e "  公网 Web: ${GREEN}http://$public_ip:$APP_PORT/web${NC}"
+        echo -e "  公网 Web: ${GREEN}http://$public_ip:$APP_PORT/admin-next/${NC}"
         echo -e "  公网 API: ${GREEN}http://$public_ip:$APP_PORT/api/v1${NC}"
     fi
     echo -e "\n${YELLOW}管理命令：${NC}"
@@ -1318,10 +1318,10 @@ show_status() {
         
         # 显示访问地址
         echo -e "\n访问地址:"
-        echo -e "  本地 Web: ${GREEN}http://localhost:$actual_port/web${NC}"
+        echo -e "  本地 Web: ${GREEN}http://localhost:$actual_port/admin-next/${NC}"
         echo -e "  本地 API: ${GREEN}http://localhost:$actual_port/api/v1${NC}"
         if [ "$public_ip" != "localhost" ]; then
-            echo -e "  公网 Web: ${GREEN}http://$public_ip:$actual_port/web${NC}"
+            echo -e "  公网 Web: ${GREEN}http://$public_ip:$actual_port/admin-next/${NC}"
             echo -e "  公网 API: ${GREEN}http://$public_ip:$actual_port/api/v1${NC}"
         fi
     else
@@ -1410,9 +1410,9 @@ show_menu() {
             # 获取公网IP
             local public_ip=$(get_public_ip)
             if [ "$public_ip" != "localhost" ]; then
-                echo -e "  公网地址: ${GREEN}http://$public_ip:$actual_port/web${NC}"
+                echo -e "  公网地址: ${GREEN}http://$public_ip:$actual_port/admin-next/${NC}"
             else
-                echo -e "  Web 界面: ${GREEN}http://localhost:$actual_port/web${NC}"
+                echo -e "  Web 界面: ${GREEN}http://localhost:$actual_port/admin-next/${NC}"
             fi
         else
             echo -e "  运行状态: ${RED}未运行${NC}"
