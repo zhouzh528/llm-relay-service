@@ -48,6 +48,7 @@ jest.mock('../src/utils/performanceOptimizer', () => ({
 
 const claudeRelayService = require('../src/services/relay/claudeRelayService')
 const metadataUserIdHelper = require('../src/utils/metadataUserIdHelper')
+const claudeCodeProfile = require('../src/config/claudeCodeProfile')
 
 describe('claudeRelayService non-real Claude Code normalization', () => {
   it('emulation 使用 CC system 形态，并把客户端 system 迁入 messages', () => {
@@ -59,10 +60,10 @@ describe('claudeRelayService non-real Claude Code normalization', () => {
 
     const result = claudeRelayService._processRequestBody(body, null, false)
 
-    // system = [billing, identity, generic(ttl/scope)]
-    expect(result.system).toHaveLength(3)
+    // system = [billing, identity, generic(ttl/scope), main(ttl)]
+    expect(result.system).toHaveLength(4)
     expect(result.system[0].text).toMatch(
-      /^x-anthropic-billing-header: cc_version=2\.1\.280\.[0-9a-f]{3}; cc_entrypoint=cli;/
+      /^x-anthropic-billing-header: cc_version=2\.1\.280\.[0-9a-f]{3}; cc_entrypoint=sdk-cli;/
     )
     expect(result.system[0].text).not.toContain('cch=')
     expect(result.system[1]).toEqual({
@@ -74,12 +75,17 @@ describe('claudeRelayService non-real Claude Code normalization', () => {
       ttl: '1h',
       scope: 'global'
     })
+    expect(result.system[3].cache_control).toEqual({ type: 'ephemeral', ttl: '1h' })
 
-    // 客户端 system 迁入 messages（role: system），不再留在 system 字段
-    expect(result.messages[0].role).toBe('system')
-    expect(result.messages[0].content[0].text).toBe('Custom system instructions')
-    const userMsg = result.messages.find((m) => m.role === 'user')
-    expect(userMsg.content[0].text).toBe('hello')
+    // 抓包顺序：user 在前，迁移后的 system(Environment) 在后
+    expect(result.messages[0].role).toBe('user')
+    expect(result.messages[0].content).toHaveLength(3)
+    expect(result.messages[0].content[2].text).toBe('hello')
+    expect(result.messages[1].role).toBe('system')
+    expect(result.messages[1].content[0].text.startsWith('# Environment')).toBe(true)
+    expect(result.messages[1].content[0].text).toContain(
+      '# Client Instructions\nCustom system instructions'
+    )
 
     expect(result.max_tokens).toBe(128000)
     expect(result.temperature).toBeUndefined()
@@ -203,7 +209,7 @@ describe('claudeRelayService non-real Claude Code normalization', () => {
     expect(result.system[0].text).toMatch(/^x-anthropic-billing-header:/)
   })
 
-  it('applies sub2api-style static tool-name mimicry without rewriting history', () => {
+  it('maps non-Claude tools to stable MCP aliases and rewrites history symmetrically', () => {
     const body = {
       tools: [
         { name: 'sessions_list', input_schema: {} },
@@ -220,21 +226,45 @@ describe('claudeRelayService non-real Claude Code normalization', () => {
     }
 
     const map = claudeRelayService._transformToolNamesInRequestBody(body)
+    const sessionsAlias = body.tools.find((tool) => tool.name.includes('sessions_list')).name
+    const sessionAlias = body.tools.find((tool) => tool.name.includes('session_get')).name
 
-    expect(body.tools[0].name).toBe('cc_sess_list')
-    expect(body.tools[1].name).toBe('cc_ses_get')
-    expect(body.tools[2].name).toBe('web_search')
-    expect(body.tool_choice.name).toBe('cc_sess_list')
-    expect(body.messages[0].content[0].name).toBe('sessions_list')
-    expect(map.get('cc_sess_list')).toBe('sessions_list')
-    expect(map.get('cc_ses_get')).toBe('session_get')
+    expect(sessionsAlias).toMatch(/^mcp__relay__sessions_list_[0-9a-f]{8}$/)
+    expect(sessionAlias).toMatch(/^mcp__relay__session_get_[0-9a-f]{8}$/)
+    expect(body.tools.find((tool) => tool.name === 'web_search')).toBeDefined()
+    expect(body.tool_choice.name).toBe(sessionsAlias)
+    expect(body.messages[0].content[0].name).toBe(sessionsAlias)
+    expect(body.messages[0].content[0].caller).toEqual({ type: 'direct' })
+    expect(map.get(sessionsAlias)).toBe('sessions_list')
+    expect(map.get(sessionAlias)).toBe('session_get')
   })
 
-  it('uses stable dynamic tool-name mimicry only above the sub2api threshold', () => {
+  it('MCP aliases never exceed Anthropic tool-name limit 64', () => {
+    const body = {
+      tools: [
+        {
+          name: 'very_long_custom_tool_name_that_is_definitely_longer_than_fifty_characters_total',
+          input_schema: {}
+        },
+        {
+          name: `mcp__existing__${'x'.repeat(90)}`,
+          input_schema: {}
+        }
+      ]
+    }
+
+    claudeRelayService._transformToolNamesInRequestBody(body)
+
+    expect(body.tools[0].name.startsWith('mcp__relay__')).toBe(true)
+    body.tools.forEach((tool) => expect(tool.name.length).toBeLessThanOrEqual(64))
+  })
+
+  it('uses stable MCP aliases instead of synthetic fake prefixes', () => {
     const buildBody = () => ({
-      tools: ['alpha', 'bravo', 'charlie', 'delta', 'echo', 'foxtrot'].map((name) => ({
+      tools: ['alpha', 'bravo', 'charlie', 'delta', 'echo', 'foxtrot'].map((name, index) => ({
         name,
-        input_schema: {}
+        input_schema: {},
+        ...(index === 0 ? { defer_loading: true } : {})
       }))
     })
     const first = buildBody()
@@ -244,47 +274,140 @@ describe('claudeRelayService non-real Claude Code normalization', () => {
     const secondMap = claudeRelayService._transformToolNamesInRequestBody(second)
 
     expect(first.tools.map((tool) => tool.name)).toEqual(second.tools.map((tool) => tool.name))
-    expect(first.tools.map((tool) => tool.name)).not.toEqual([
-      'alpha',
-      'bravo',
-      'charlie',
-      'delta',
-      'echo',
-      'foxtrot'
-    ])
     expect(firstMap.size).toBe(6)
     expect(secondMap.size).toBe(6)
     first.tools.forEach((tool) => {
-      expect(tool.name).toMatch(/^[a-z]+_[a-z0-9]{1,3}\d{2}$/)
+      expect(tool.name).toMatch(/^mcp__relay__[a-z]+_[0-9a-f]{8}$/)
+      expect(tool.eager_input_streaming).toBe(true)
+      expect(tool.defer_loading).toBeUndefined()
+      expect(tool.cache_control).toBeUndefined()
     })
   })
 
-  it('restores mimicry names in response bytes, including static names without a map', () => {
+  it('uses the captured 2.1.280 shape for a schema-compatible built-in tool', () => {
+    const template = claudeCodeProfile.getProfile().tools.find((tool) => tool.name === 'Bash')
+    const body = {
+      tools: [
+        {
+          name: 'bash',
+          description: 'third-party description',
+          input_schema: JSON.parse(JSON.stringify(template.input_schema)),
+          cache_control: { type: 'ephemeral' }
+        }
+      ]
+    }
+
+    const map = claudeRelayService._transformToolNamesInRequestBody(body)
+
+    expect(body.tools[0]).toEqual(template)
+    expect(map.get('Bash')).toBe('bash')
+  })
+
+  it('adds caller and tool_addition metadata for deferred MCP aliases on continued turns', () => {
+    const body = {
+      tools: [
+        { name: 'custom_lookup', description: 'Lookup data', input_schema: {} },
+        { name: 'custom_unused', description: 'Unused data tool', input_schema: {} }
+      ],
+      messages: [
+        { role: 'user', content: [{ type: 'text', text: 'look this up' }] },
+        {
+          role: 'assistant',
+          content: [{ type: 'tool_use', id: 'toolu_1', name: 'custom_lookup', input: {} }]
+        },
+        { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'toolu_1', content: 'ok' }] }
+      ]
+    }
+
+    claudeRelayService._transformToolNamesInRequestBody(body)
+
+    const usedAlias = body.tools.find((tool) => tool.name.includes('custom_lookup')).name
+    const unusedAlias = body.tools.find((tool) => tool.name.includes('custom_unused')).name
+    expect(usedAlias).toMatch(/^mcp__relay__custom_lookup_[0-9a-f]{8}$/)
+    expect(unusedAlias).toMatch(/^mcp__relay__custom_unused_[0-9a-f]{8}$/)
+    body.tools.forEach((tool) => {
+      expect(tool.eager_input_streaming).toBe(true)
+      expect(tool.defer_loading).toBe(true)
+    })
+    expect(body.messages[1].content[0]).toMatchObject({
+      name: usedAlias,
+      caller: { type: 'direct' }
+    })
+    const additionMessage = body.messages[body.messages.length - 1]
+    expect(additionMessage.role).toBe('system')
+    expect(additionMessage.content[1]).toEqual({
+      type: 'tool_addition',
+      tool: { type: 'tool_reference', name: unusedAlias },
+      cache_control: { type: 'ephemeral', ttl: '1h' }
+    })
+  })
+
+  it('preserves forced tool choice semantics as a system directive before whitelist serialization', () => {
+    const template = claudeCodeProfile.getProfile().tools.find((tool) => tool.name === 'Bash')
+    const body = {
+      tools: [
+        {
+          name: 'bash',
+          description: 'run commands',
+          input_schema: JSON.parse(JSON.stringify(template.input_schema))
+        }
+      ],
+      tool_choice: { type: 'tool', name: 'bash' },
+      messages: [
+        { role: 'user', content: [{ type: 'text', text: 'run it' }] },
+        { role: 'system', content: [{ type: 'text', text: '# Environment' }] }
+      ]
+    }
+
+    claudeRelayService._transformToolNamesInRequestBody(body)
+
+    expect(body.tool_choice.name).toBe('Bash')
+    expect(body.messages[1].content.at(-1).text).toContain('Use the Bash tool')
+  })
+
+  it.each([
+    ['none', 'Do not use any tools'],
+    ['any', 'Use one of the available tools']
+  ])('preserves tool_choice:%s semantics as a system directive', (type, expected) => {
+    const body = {
+      tools: [{ name: 'custom_lookup', input_schema: {} }],
+      tool_choice: { type },
+      messages: [
+        { role: 'user', content: [{ type: 'text', text: 'run it' }] },
+        { role: 'system', content: [{ type: 'text', text: '# Environment' }] }
+      ]
+    }
+
+    claudeRelayService._transformToolNamesInRequestBody(body)
+
+    expect(body.messages[1].content.at(-1).text).toContain(expected)
+  })
+
+  it('restores MCP aliases in response bytes and streaming text', () => {
     const body = {
       tools: [{ name: 'sessions_list', input_schema: {} }]
     }
     const map = claudeRelayService._transformToolNamesInRequestBody(body)
+    const alias = body.tools[0].name
 
-    const dynamicRestored = claudeRelayService._restoreToolNamesInResponseBody(
-      '{"content":[{"type":"tool_use","name":"cc_sess_list"}]}',
+    const restoredBody = claudeRelayService._restoreToolNamesInResponseBody(
+      JSON.stringify({
+        content: [
+          { type: 'text', text: `Do not rewrite ${alias} in ordinary text` },
+          { type: 'tool_use', name: alias, input: { note: alias } }
+        ]
+      }),
       map
     )
-    const staticRestored = claudeRelayService._restoreToolNamesInResponseBody(
-      '{"content":[{"type":"tool_use","name":"cc_ses_get"}]}',
-      null
+    const parsedBody = JSON.parse(restoredBody)
+    expect(parsedBody.content[0].text).toContain(alias)
+    expect(parsedBody.content[1].name).toBe('sessions_list')
+    expect(parsedBody.content[1].input.note).toBe(alias)
+
+    const transform = claudeRelayService._createToolNameStripperStreamTransformer(null, map)
+    const restoredStream = transform(
+      `event: content_block_start\ndata: {"content_block":{"type":"tool_use","name":"${alias}"}}\n\n`
     )
-
-    expect(dynamicRestored).toContain('"name":"sessions_list"')
-    expect(staticRestored).toContain('"name":"session_get"')
-  })
-
-  it('restores static mimicry names in streaming text when enabled', () => {
-    const transform = claudeRelayService._createToolNameStripperStreamTransformer(null, null, true)
-
-    const restored = transform(
-      'event: content_block_start\ndata: {"content_block":{"type":"tool_use","name":"cc_ses_get"}}\n\n'
-    )
-
-    expect(restored).toContain('"name":"session_get"')
+    expect(restoredStream).toContain('"name":"sessions_list"')
   })
 })

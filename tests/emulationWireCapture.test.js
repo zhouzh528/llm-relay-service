@@ -69,7 +69,8 @@ const http = require('http')
 const claudeRelayService = require('../src/services/relay/claudeRelayService')
 const claudeCodeProfile = require('../src/config/claudeCodeProfile')
 
-const ACCOUNT = { id: 'acct-wire', useUnifiedUserAgent: 'false' }
+// 即使旧账号打开 useUnifiedUserAgent，也不得再让客户端 UA 覆盖固定 2.1.280 profile。
+const ACCOUNT = { id: 'acct-wire', useUnifiedUserAgent: 'true' }
 const EXPECTED_VERSION = '2.1.280'
 
 describe('emulation outbound request wire shape (v2.1.280 baseline)', () => {
@@ -106,7 +107,11 @@ describe('emulation outbound request wire shape (v2.1.280 baseline)', () => {
       messages: [
         { role: 'user', content: [{ type: 'text', text: 'wire capture payload example text' }] }
       ],
-      system: 'You are a helpful third party agent.'
+      system: 'You are a helpful third party agent.',
+      temperature: 0.4,
+      top_p: 0.9,
+      stop_sequences: ['third-party-only'],
+      unsupported_client_field: true
     }
 
     const processed = claudeRelayService._processRequestBody(clientBody, ACCOUNT, false, {
@@ -114,8 +119,15 @@ describe('emulation outbound request wire shape (v2.1.280 baseline)', () => {
     })
     const prepared = await claudeRelayService._prepareRequestHeadersAndPayload(
       processed,
-      // 客户端声明了一个额外的 beta：统一化后不得透传给上游
-      { 'anthropic-beta': 'context-1m-2025-08-07' },
+      // 客户端声明的 header 均不得覆盖 canonical profile
+      {
+        accept: 'text/plain',
+        'content-type': 'text/plain',
+        connection: 'close',
+        'anthropic-version': '2099-01-01',
+        'anthropic-beta': 'context-1m-2025-08-07',
+        'user-agent': 'third-party-client/9.9.9'
+      },
       ACCOUNT.id,
       'sk-ant-oat0-wire-test',
       {
@@ -149,6 +161,34 @@ describe('emulation outbound request wire shape (v2.1.280 baseline)', () => {
     expect(received.method).toBe('POST')
     expect(received.url).toBe('/v1/messages?beta=true')
 
+    const rawHeaderNames = received.rawHeaders.filter((_, index) => index % 2 === 0)
+    expect(rawHeaderNames).toEqual([
+      'Accept',
+      'Authorization',
+      'Content-Type',
+      'User-Agent',
+      'X-Claude-Code-Session-Id',
+      'X-Stainless-Arch',
+      'X-Stainless-Lang',
+      'X-Stainless-OS',
+      'X-Stainless-Package-Version',
+      'X-Stainless-Retry-Count',
+      'X-Stainless-Runtime',
+      'X-Stainless-Runtime-Version',
+      'X-Stainless-Timeout',
+      'anthropic-beta',
+      'anthropic-dangerous-direct-browser-access',
+      'anthropic-dispatch-id',
+      'anthropic-version',
+      'x-app',
+      'x-claude-code-request-class',
+      'x-client-request-id',
+      'Connection',
+      'Host',
+      'Accept-Encoding',
+      'Content-Length'
+    ])
+
     const headers = {}
     for (let i = 0; i < received.rawHeaders.length; i += 2) {
       headers[received.rawHeaders[i].toLowerCase()] = received.rawHeaders[i + 1]
@@ -157,8 +197,10 @@ describe('emulation outbound request wire shape (v2.1.280 baseline)', () => {
     const sent = JSON.parse(received.body)
 
     // ——— 版本声明 / 身份类 header ———
-    expect(headers['user-agent']).toBe(`claude-cli/${EXPECTED_VERSION} (external, cli)`)
+    expect(headers['user-agent']).toBe(`claude-cli/${EXPECTED_VERSION} (external, sdk-cli)`)
     expect(headers['anthropic-version']).toBe('2023-06-01')
+    expect(headers['content-type']).toBe('application/json')
+    expect(headers.connection).toBe('keep-alive')
     expect(headers['x-app']).toBe('cli')
     expect(headers['anthropic-dangerous-direct-browser-access']).toBe('true')
     expect(headers['accept']).toBe('application/json')
@@ -185,19 +227,48 @@ describe('emulation outbound request wire shape (v2.1.280 baseline)', () => {
       edits: [{ type: 'clear_thinking_20251015', keep: 'all' }]
     })
     expect(sent.max_tokens).toBe(128000)
+    expect(Object.keys(sent)).toEqual([
+      'model',
+      'messages',
+      'system',
+      'tools',
+      'metadata',
+      'max_tokens',
+      'thinking',
+      'context_management',
+      'output_config',
+      'diagnostics',
+      'stream'
+    ])
+    expect(sent.tools).toEqual([])
+    expect(sent.diagnostics).toEqual({ previous_message_id: null })
+    expect(sent.stop_sequences).toBeUndefined()
+    expect(sent.unsupported_client_field).toBeUndefined()
 
     // ——— system[0]：2.1.280 字段顺序，且不含 cch ———
     const billing = sent.system[0].text
     expect(billing).toMatch(
-      /^x-anthropic-billing-header: cc_version=2\.1\.280\.[0-9a-f]{3}; cc_entrypoint=cli; cc_prompt_id=[0-9a-f-]{36}; cc_turn_origin=cli;$/
+      /^x-anthropic-billing-header: cc_version=2\.1\.280\.[0-9a-f]{3}; cc_entrypoint=sdk-cli; cc_prompt_id=[0-9a-f-]{36}; cc_turn_origin=sdk;$/
     )
     expect(billing).not.toContain('cch=')
     expect(sent.system[1].text).toBe(profile.system.identity)
+    expect(sent.system).toHaveLength(4)
+    expect(sent.system[2].text).toBe(profile.system.genericInstructions)
     expect(sent.system[2].cache_control).toEqual({ type: 'ephemeral', ttl: '1h', scope: 'global' })
+    expect(sent.system[3].text).toContain('<total_tokens>15000000 tokens left</total_tokens>')
+    expect(sent.system[3].cache_control).toEqual({ type: 'ephemeral', ttl: '1h' })
 
-    // ——— 客户端 system 迁入 messages，且不残留自造常量 ———
-    expect(sent.messages[0].role).toBe('system')
-    expect(sent.messages[0].content[0].text).toBe('You are a helpful third party agent.')
+    // ——— 第一轮 messages 顺序为 user → system(Environment) ———
+    expect(sent.messages[0].role).toBe('user')
+    expect(sent.messages[0].content).toHaveLength(3)
+    expect(sent.messages[0].content.map((block) => block.type)).toEqual(['text', 'text', 'text'])
+    sent.messages[0].content.forEach((block) => expect(block.cache_control).toBeUndefined())
+    expect(sent.messages[1].role).toBe('system')
+    expect(sent.messages[1].content[0].text.startsWith('# Environment')).toBe(true)
+    expect(sent.messages[1].content[0].text).toContain(
+      '# Client Instructions\nYou are a helpful third party agent.'
+    )
+    expect(sent.messages[1].content[0].cache_control).toEqual({ type: 'ephemeral', ttl: '1h' })
     const flat = JSON.stringify(sent)
     expect(flat).not.toContain('[System Instructions]')
     expect(flat).not.toContain('Understood. I will follow these instructions')
@@ -263,7 +334,7 @@ describe('emulation outbound request wire shape (v2.1.280 baseline)', () => {
     }
     const sent = JSON.parse(received.body)
 
-    // 入口跟随客户端 → UA 声明 sdk-cli；固定头与 beta 仍由中转统一注入
+    // 所有客户端固定为 sdk-cli 基线；固定头与 beta 由中转统一注入
     expect(headers['user-agent']).toBe(`claude-cli/${EXPECTED_VERSION} (external, sdk-cli)`)
     expect(headers['anthropic-dispatch-id']).toBe('v2d')
     expect(headers['anthropic-beta']).toBe(profile.betas.join(','))
@@ -274,8 +345,127 @@ describe('emulation outbound request wire shape (v2.1.280 baseline)', () => {
     expect(sent.system[0].text).toMatch(
       /^x-anthropic-billing-header: cc_version=2\.1\.280\.[0-9a-f]{3}; cc_entrypoint=sdk-cli;/
     )
+    expect(sent.system).toHaveLength(4)
     expect(sent.system[0].text).toContain('cc_turn_origin=sdk;')
     expect(sent.system[0].text).not.toContain('cch=')
     expect(sent.temperature).toBeUndefined()
+  })
+
+  it('schema-compatible 工具目录按抓包的 12 个名称/顺序/额外字段发出', async () => {
+    const profile = claudeCodeProfile.getProfile()
+    const processed = claudeRelayService._processRequestBody(
+      {
+        model: 'claude-opus-5-5',
+        messages: [{ role: 'user', content: [{ type: 'text', text: 'tool catalog payload' }] }],
+        tools: JSON.parse(JSON.stringify(profile.tools))
+      },
+      ACCOUNT,
+      false
+    )
+    const prepared = await claudeRelayService._prepareRequestHeadersAndPayload(
+      processed,
+      {},
+      ACCOUNT.id,
+      'sk-ant-oat0-tools-test',
+      {
+        account: ACCOUNT,
+        requestOptions: {},
+        isStream: true,
+        sessionHash: null
+      }
+    )
+
+    await new Promise((resolve, reject) => {
+      const req = http.request(
+        {
+          host: '127.0.0.1',
+          port,
+          method: 'POST',
+          path: '/v1/messages?beta=true',
+          headers: prepared.headers
+        },
+        (res) => {
+          res.resume()
+          res.on('end', resolve)
+        }
+      )
+      req.on('error', reject)
+      req.end(prepared.bodyString)
+    })
+
+    const sent = JSON.parse(received.body)
+    expect(sent.tools.map((tool) => tool.name)).toEqual(profile.tools.map((tool) => tool.name))
+    expect(sent.tools).toHaveLength(12)
+    expect(sent.tools.find((tool) => tool.name === 'Bash').eager_input_streaming).toBe(true)
+    expect(sent.tools.find((tool) => tool.name === 'DeferredToolPlaceholder')).toMatchObject({
+      defer_loading: true
+    })
+    expect(sent.tools.find((tool) => tool.name === 'advisor')).toMatchObject({
+      type: 'advisor_20260301',
+      model: 'claude-opus-5-5',
+      defer_loading: true
+    })
+    sent.tools.forEach((tool) => expect(tool.cache_control).toBeUndefined())
+  })
+
+  it('重试计数与上一轮工具耗时按抓包位置写入 header', async () => {
+    const durationSpy = jest
+      .spyOn(claudeRelayService, '_getPreviousToolDurationsHeader')
+      .mockResolvedValue('Read=11')
+    try {
+      const processed = claudeRelayService._processRequestBody(
+        {
+          model: 'claude-opus-5-5',
+          messages: [{ role: 'user', content: [{ type: 'text', text: 'retry payload' }] }]
+        },
+        ACCOUNT,
+        false
+      )
+      const prepared = await claudeRelayService._prepareRequestHeadersAndPayload(
+        processed,
+        { connection: 'close', accept: 'text/plain' },
+        ACCOUNT.id,
+        'sk-ant-oat0-retry-test',
+        {
+          account: ACCOUNT,
+          requestOptions: { stainlessRetryCount: 2 },
+          isStream: true,
+          sessionHash: null
+        }
+      )
+
+      await new Promise((resolve, reject) => {
+        const req = http.request(
+          {
+            host: '127.0.0.1',
+            port,
+            method: 'POST',
+            path: '/v1/messages?beta=true',
+            headers: prepared.headers
+          },
+          (res) => {
+            res.resume()
+            res.on('end', resolve)
+          }
+        )
+        req.on('error', reject)
+        req.end(prepared.bodyString)
+      })
+
+      const names = received.rawHeaders.filter((_, index) => index % 2 === 0)
+      const values = {}
+      for (let index = 0; index < received.rawHeaders.length; index += 2) {
+        values[received.rawHeaders[index]] = received.rawHeaders[index + 1]
+      }
+      expect(values['X-Stainless-Retry-Count']).toBe('2')
+      expect(values['x-claude-code-prev-tool-durations']).toBe('Read=11')
+      expect(names.indexOf('x-claude-code-prev-tool-durations')).toBe(
+        names.indexOf('x-claude-code-request-class') - 1
+      )
+      expect(values.Connection).toBe('keep-alive')
+      expect(values.Accept).toBe('application/json')
+    } finally {
+      durationSpy.mockRestore()
+    }
   })
 })

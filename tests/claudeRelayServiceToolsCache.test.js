@@ -337,6 +337,26 @@ describe('_enforceCacheControlLimit with tools', () => {
     expect(body.tools[0].cache_control).toBeDefined()
   })
 
+  it('递归计算并削减 tool_result.content 中的嵌套 cache_control', () => {
+    const nestedBlocks = Array.from({ length: 5 }, (_, index) => ({
+      type: 'text',
+      text: `nested-${index}`,
+      cache_control: { type: 'ephemeral' }
+    }))
+    const body = {
+      messages: [
+        {
+          role: 'user',
+          content: [{ type: 'tool_result', tool_use_id: 'toolu_1', content: nestedBlocks }]
+        }
+      ]
+    }
+
+    claudeRelayService._enforceCacheControlLimit(body)
+
+    expect(nestedBlocks.filter((block) => block.cache_control)).toHaveLength(4)
+  })
+
   it('messages/system 都没有可删时才动 tools', () => {
     // 5 个全在 tools
     const tools = Array.from({ length: 5 }, (_, i) => ({
@@ -357,18 +377,17 @@ describe('_enforceCacheControlLimit with tools', () => {
 // ---------------------------------------------------------------------------
 // _processRequestBody 端到端（非真 Claude Code）
 // ---------------------------------------------------------------------------
-describe('_processRequestBody — tools cache_control injection (non-real Claude Code)', () => {
-  it('非真 Claude Code 请求带 tools，处理后 tools 末尾被注入', () => {
+describe('_processRequestBody — Claude Code 2.1.280 cache shape', () => {
+  it('非真 Claude Code 请求带 tools，处理后不在 tools 上注入 cache_control', () => {
     const body = makeBody({ tools: makeTools(5) })
     const result = claudeRelayService._processRequestBody(body, null, false)
 
     expect(result.tools).toBeDefined()
     expect(result.tools).toHaveLength(5)
-    expect(result.tools[4].cache_control).toEqual({ type: 'ephemeral' })
-    expect(result.tools[0].cache_control).toBeUndefined()
+    result.tools.forEach((tool) => expect(tool.cache_control).toBeUndefined())
   })
 
-  it('统一化后：真 Claude Code 客户端请求同样注入 tools cache_control', () => {
+  it('真 Claude Code 客户端请求也不在 tools 上注入 cache_control', () => {
     const body = {
       model: 'claude-sonnet-4-6',
       messages: [{ role: 'user', content: [{ type: 'text', text: 'hello' }] }],
@@ -377,8 +396,7 @@ describe('_processRequestBody — tools cache_control injection (non-real Claude
     }
     const result = claudeRelayService._processRequestBody(body, null, true)
 
-    // 统一化：所有请求走同一路径，tools 末尾同样被注入
-    expect(result.tools[2].cache_control).toEqual({ type: 'ephemeral' })
+    result.tools.forEach((tool) => expect(tool.cache_control).toBeUndefined())
   })
 
   it('非真 Claude Code 请求无 tools 时其他行为不变', () => {

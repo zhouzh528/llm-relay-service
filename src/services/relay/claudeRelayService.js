@@ -4,7 +4,6 @@ const { Transform } = require('stream')
 const path = require('path')
 const crypto = require('crypto')
 const ProxyHelper = require('../../utils/proxyHelper')
-const { filterForClaude } = require('../../utils/headerFilter')
 const claudeAccountService = require('../account/claudeAccountService')
 const unifiedClaudeScheduler = require('../scheduler/unifiedClaudeScheduler')
 const sessionHelper = require('../../utils/sessionHelper')
@@ -45,42 +44,6 @@ class ClaudeRelayService {
     this.betaHeader = config.claude.betaHeader
     this.systemPrompt = config.claude.systemPrompt
     this.claudeCodeSystemPrompt = claudeCodeProfile.getProfile().system.identity
-    // ⚠️ 已移除自造的 expansion 常量：它在所有部署中字节相同，本身即是固定指纹。
-    // 通用说明块改由 _getGenericInstructions() 提供（支持 config 覆盖）。
-    this.toolNameSuffix = null
-    this.toolNameSuffixGeneratedAt = 0
-    this.toolNameSuffixTtlMs = 60 * 60 * 1000
-    this.staticToolNameRewrites = new Map([
-      ['sessions_', 'cc_sess_'],
-      ['session_', 'cc_ses_']
-    ])
-    this.fakeToolNamePrefixes = [
-      'analyze_',
-      'compute_',
-      'fetch_',
-      'generate_',
-      'lookup_',
-      'modify_',
-      'process_',
-      'query_',
-      'render_',
-      'resolve_',
-      'sync_',
-      'update_',
-      'validate_',
-      'convert_',
-      'extract_',
-      'manage_',
-      'monitor_',
-      'parse_',
-      'review_',
-      'search_',
-      'transform_',
-      'handle_',
-      'invoke_',
-      'notify_'
-    ]
-    this.dynamicToolMapThreshold = 5
     this.nonRealClaudeCodeToolDescriptions = new Map([
       ['apply_patch', 'Apply a patch to modify files.'],
       ['bash', 'Run shell commands in the user environment.'],
@@ -291,20 +254,6 @@ class ClaudeRelayService {
     )
   }
 
-  _getToolNameSuffix() {
-    const now = Date.now()
-    if (!this.toolNameSuffix || now - this.toolNameSuffixGeneratedAt > this.toolNameSuffixTtlMs) {
-      this.toolNameSuffix = Math.random().toString(36).substring(2, 8)
-      this.toolNameSuffixGeneratedAt = now
-    }
-    return this.toolNameSuffix
-  }
-
-  _toRandomizedToolName(name) {
-    const suffix = this._getToolNameSuffix()
-    return `${name}_${suffix}`
-  }
-
   _shouldMimicToolName(tool) {
     if (!tool || typeof tool !== 'object') {
       return false
@@ -312,52 +261,6 @@ class ClaudeRelayService {
 
     const toolType = typeof tool.type === 'string' ? tool.type : ''
     return toolType === '' || toolType === 'function' || toolType === 'custom'
-  }
-
-  _shuffleToolNamePrefixes(toolNames) {
-    const prefixes = [...this.fakeToolNamePrefixes]
-    const seedMaterial = toolNames.join('\0')
-
-    for (let index = prefixes.length - 1; index > 0; index -= 1) {
-      const digest = crypto.createHash('sha256').update(seedMaterial).update(`:${index}`).digest()
-      const swapIndex = digest.readUInt32BE(0) % (index + 1)
-      const current = prefixes[index]
-      prefixes[index] = prefixes[swapIndex]
-      prefixes[swapIndex] = current
-    }
-
-    return prefixes
-  }
-
-  _buildDynamicToolNameMap(toolNames) {
-    if (!Array.isArray(toolNames) || toolNames.length <= this.dynamicToolMapThreshold) {
-      return null
-    }
-
-    const prefixes = this._shuffleToolNamePrefixes(toolNames)
-    const mapping = new Map()
-
-    toolNames.forEach((name, index) => {
-      const prefix = prefixes[index % prefixes.length]
-      const head = name.slice(0, Math.min(3, name.length))
-      mapping.set(name, `${prefix}${head}${String(index).padStart(2, '0')}`)
-    })
-
-    return mapping
-  }
-
-  _sanitizeToolName(name, dynamicMap) {
-    if (dynamicMap?.has(name)) {
-      return dynamicMap.get(name)
-    }
-
-    for (const [prefix, replacement] of this.staticToolNameRewrites.entries()) {
-      if (name.startsWith(prefix)) {
-        return `${replacement}${name.slice(prefix.length)}`
-      }
-    }
-
-    return name
   }
 
   _normalizeToolCatalogName(name) {
@@ -428,64 +331,281 @@ class ClaudeRelayService {
     })
   }
 
-  _buildToolNameRewrite(body, options = {}) {
+  _canonicalClaudeToolName(name) {
+    if (typeof name !== 'string' || !name.trim()) {
+      return ''
+    }
+    const aliases = new Map([
+      ['agent', 'Agent'],
+      ['task', 'Agent'],
+      ['bash', 'Bash'],
+      ['shell', 'Bash'],
+      ['run_shell_command', 'Bash'],
+      ['edit', 'Edit'],
+      ['apply_patch', 'Edit'],
+      ['listagents', 'ListAgents'],
+      ['list_agents', 'ListAgents'],
+      ['read', 'Read'],
+      ['read_file', 'Read'],
+      ['readfile', 'Read'],
+      ['reportfindings', 'ReportFindings'],
+      ['report_findings', 'ReportFindings'],
+      ['schedulewakeup', 'ScheduleWakeup'],
+      ['schedule_wakeup', 'ScheduleWakeup'],
+      ['skill', 'Skill'],
+      ['toolsearch', 'ToolSearch'],
+      ['tool_search', 'ToolSearch'],
+      ['deferredtoolplaceholder', 'DeferredToolPlaceholder'],
+      ['write', 'Write'],
+      ['write_file', 'Write'],
+      ['writefile', 'Write'],
+      ['advisor', 'advisor']
+    ])
+    return aliases.get(name.trim().toLowerCase()) || ''
+  }
+
+  _buildMcpToolAlias(name, tool) {
+    const schemaHash = crypto
+      .createHash('sha256')
+      .update(`${name}:${JSON.stringify(tool?.input_schema || {})}`)
+      .digest('hex')
+      .slice(0, 8)
+    if (name.startsWith('mcp__')) {
+      return name.length <= 64 ? name : `${name.slice(0, 55)}_${schemaHash}`
+    }
+    // mcp__relay__ (12) + safeName (≤43) + _ + hash (8) = ≤64 characters.
+    const safeName = name.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 43) || 'tool'
+    return `mcp__relay__${safeName}_${schemaHash}`
+  }
+
+  _stableJson(value) {
+    if (Array.isArray(value)) {
+      return value.map((item) => this._stableJson(item))
+    }
+    if (value && typeof value === 'object') {
+      return Object.keys(value)
+        .sort()
+        .reduce((result, key) => {
+          result[key] = this._stableJson(value[key])
+          return result
+        }, {})
+    }
+    return value
+  }
+
+  _buildToolNameRewrite(body) {
     if (!Array.isArray(body?.tools)) {
       return null
     }
 
-    const toolNames = []
+    const forwardMap = new Map()
+    const reverseMap = new Map()
+    const usedNames = new Set()
+
     body.tools.forEach((tool) => {
       if (!this._shouldMimicToolName(tool) || typeof tool.name !== 'string' || !tool.name) {
         return
       }
-      toolNames.push(tool.name)
-    })
-
-    const dynamicMap =
-      options.useRandomizedToolNames === true
-        ? new Map(toolNames.map((name) => [name, this._toRandomizedToolName(name)]))
-        : this._buildDynamicToolNameMap(toolNames)
-
-    const forwardMap = new Map()
-    const reverseMap = new Map()
-
-    toolNames.forEach((name) => {
-      const transformed =
-        options.useRandomizedToolNames === true
-          ? dynamicMap.get(name)
-          : this._sanitizeToolName(name, dynamicMap)
-
-      if (transformed && transformed !== name) {
-        forwardMap.set(name, transformed)
-        reverseMap.set(transformed, name)
+      const originalName = tool.name
+      const canonicalName = this._canonicalClaudeToolName(originalName)
+      const template = this._getProfile().tools.find((item) => item.name === canonicalName)
+      const schemaCompatible =
+        template &&
+        JSON.stringify(this._stableJson(tool.input_schema || {})) ===
+          JSON.stringify(this._stableJson(template.input_schema || {}))
+      let transformed = schemaCompatible ? canonicalName : ''
+      if (!transformed || usedNames.has(transformed)) {
+        transformed = this._buildMcpToolAlias(originalName, tool)
+      }
+      usedNames.add(transformed)
+      if (transformed !== originalName) {
+        forwardMap.set(originalName, transformed)
+        reverseMap.set(transformed, originalName)
       }
     })
-
-    if (reverseMap.size === 0) {
-      return null
-    }
 
     return { forwardMap, reverseMap }
   }
 
-  _transformToolNamesInRequestBody(body, options = {}) {
-    if (!body || typeof body !== 'object') {
+  _applyCapturedToolShape(tool, options = {}) {
+    if (!tool || typeof tool !== 'object' || typeof tool.name !== 'string') {
+      return tool
+    }
+    const template = this._getProfile().tools.find((item) => item.name === tool.name)
+    if (template) {
+      const schemasMatch =
+        JSON.stringify(this._stableJson(tool.input_schema || {})) ===
+        JSON.stringify(this._stableJson(template.input_schema || {}))
+      const shaped = {
+        ...tool,
+        name: template.name,
+        description: template.description,
+        ...(schemasMatch ? { input_schema: safeClone(template.input_schema) } : {})
+      }
+      Object.keys(template).forEach((key) => {
+        if (!['name', 'description', 'input_schema'].includes(key)) {
+          shaped[key] = safeClone(template[key])
+        }
+      })
+      delete shaped.cache_control
+      return shaped
+    }
+
+    const shaped = { ...tool, eager_input_streaming: true }
+    if (options.deferUnknown === true) {
+      shaped.defer_loading = true
+    } else {
+      // 首轮未知工具必须立即可用；客户端自带的 defer_loading 不得形成无 addition 的死工具。
+      delete shaped.defer_loading
+    }
+    delete shaped.cache_control
+    return shaped
+  }
+
+  _walkToolBlocks(value, visitor) {
+    if (Array.isArray(value)) {
+      value.forEach((item) => this._walkToolBlocks(item, visitor))
+      return
+    }
+    if (!value || typeof value !== 'object') {
+      return
+    }
+    visitor(value)
+    if (value.content) {
+      this._walkToolBlocks(value.content, visitor)
+    }
+    if (value.tool && typeof value.tool === 'object') {
+      this._walkToolBlocks(value.tool, visitor)
+    }
+  }
+
+  _rewriteHistoricalToolNames(messages, forwardMap) {
+    if (!Array.isArray(messages) || !forwardMap) {
+      return
+    }
+    this._walkToolBlocks(messages, (block) => {
+      if (block.type === 'tool_use' && typeof block.name === 'string') {
+        block.name = forwardMap.get(block.name) || block.name
+        if (!block.caller) {
+          block.caller = { type: 'direct' }
+        }
+      }
+      if (block.type === 'tool_reference' && typeof block.name === 'string') {
+        block.name = forwardMap.get(block.name) || block.name
+      }
+    })
+  }
+
+  _injectToolAdditionMessage(body) {
+    if (!Array.isArray(body?.messages) || !Array.isArray(body?.tools)) {
+      return
+    }
+    const hasToolHistory = body.messages.some(
+      (message) =>
+        Array.isArray(message?.content) &&
+        message.content.some((block) => block?.type === 'tool_use' || block?.type === 'tool_result')
+    )
+    if (!hasToolHistory) {
+      return
+    }
+
+    const existing = new Set()
+    this._walkToolBlocks(body.messages, (block) => {
+      if (
+        (block.type === 'tool_use' || block.type === 'tool_reference') &&
+        typeof block.name === 'string'
+      ) {
+        existing.add(block.name)
+      }
+    })
+    const additions = body.tools.filter(
+      (tool) =>
+        typeof tool?.name === 'string' && tool.name.startsWith('mcp__') && !existing.has(tool.name)
+    )
+    if (additions.length === 0) {
+      return
+    }
+
+    const names = additions.map((tool) => tool.name)
+    const content = [
+      {
+        type: 'text',
+        text: `The following tools just became available and are ready to use:\n${names.join('\n')}`
+      },
+      ...names.map((name) => ({
+        type: 'tool_addition',
+        tool: { type: 'tool_reference', name }
+      }))
+    ]
+    content[content.length - 1].cache_control = { type: 'ephemeral', ttl: '1h' }
+    body.messages.push({ role: 'system', content })
+  }
+
+  _applyToolChoiceDirective(body) {
+    if (!body?.tool_choice || !Array.isArray(body.messages)) {
+      return
+    }
+    let text = ''
+    if (body.tool_choice.type === 'tool' && typeof body.tool_choice.name === 'string') {
+      text = `Use the ${body.tool_choice.name} tool for the next response.`
+    } else if (body.tool_choice.type === 'none') {
+      text = 'Do not use any tools in the next response.'
+    } else if (body.tool_choice.type === 'any') {
+      text = 'Use one of the available tools in the next response.'
+    }
+    if (!text) {
+      return
+    }
+    const directive = { type: 'text', text }
+    let systemMessage = body.messages.find((message) => message?.role === 'system')
+    if (!systemMessage) {
+      systemMessage = { role: 'system', content: [] }
+      const firstUserIndex = body.messages.findIndex((message) => message?.role === 'user')
+      body.messages.splice(
+        firstUserIndex >= 0 ? firstUserIndex + 1 : body.messages.length,
+        0,
+        systemMessage
+      )
+    }
+    if (typeof systemMessage.content === 'string') {
+      systemMessage.content += `\n\n${directive.text}`
+    } else if (Array.isArray(systemMessage.content)) {
+      systemMessage.content.push(directive)
+    }
+  }
+
+  _transformToolNamesInRequestBody(body) {
+    if (!body || typeof body !== 'object' || !Array.isArray(body.tools)) {
       return null
     }
 
-    const rewrite = this._buildToolNameRewrite(body, options)
-    if (!rewrite) {
-      return null
-    }
+    const rewrite = this._buildToolNameRewrite(body)
+    const { forwardMap, reverseMap } = rewrite
+    const hasToolHistory = Array.isArray(body.messages)
+      ? body.messages.some(
+          (message) =>
+            Array.isArray(message?.content) &&
+            message.content.some(
+              (block) => block?.type === 'tool_use' || block?.type === 'tool_result'
+            )
+        )
+      : false
+    body.tools = body.tools.map((tool) => {
+      const originalName = tool.name
+      const mapped = forwardMap.get(originalName) || originalName
+      return this._applyCapturedToolShape(
+        { ...tool, name: mapped },
+        { deferUnknown: hasToolHistory && mapped.startsWith('mcp__') }
+      )
+    })
 
-    body.tools.forEach((tool) => {
-      if (!this._shouldMimicToolName(tool) || typeof tool.name !== 'string') {
-        return
-      }
-
-      if (rewrite.forwardMap.has(tool.name)) {
-        tool.name = rewrite.forwardMap.get(tool.name)
-      }
+    // 抓包顺序：固定工具按 profile 顺序；MCP 工具位于普通工具与
+    // DeferredToolPlaceholder/advisor 之间。
+    const rank = new Map(this._getProfile().tools.map((tool, index) => [tool.name, index]))
+    body.tools.sort((left, right) => {
+      const leftRank = rank.has(left.name) ? rank.get(left.name) : 9.5
+      const rightRank = rank.has(right.name) ? rank.get(right.name) : 9.5
+      return leftRank - rightRank
     })
 
     if (
@@ -494,41 +614,29 @@ class ClaudeRelayService {
       body.tool_choice.type === 'tool' &&
       typeof body.tool_choice.name === 'string'
     ) {
-      if (rewrite.forwardMap.has(body.tool_choice.name)) {
-        body.tool_choice.name = rewrite.forwardMap.get(body.tool_choice.name)
-      }
+      body.tool_choice.name = forwardMap.get(body.tool_choice.name) || body.tool_choice.name
     }
+    this._applyToolChoiceDirective(body)
+    this._rewriteHistoricalToolNames(body.messages, forwardMap)
+    this._injectToolAdditionMessage(body)
 
-    return rewrite.reverseMap
+    return reverseMap.size > 0 ? reverseMap : null
   }
 
-  _restoreToolNamesInText(text, toolNameMap, includeStatic = true) {
-    if (typeof text !== 'string' || text.length === 0) {
+  _restoreToolNamesInText(text, toolNameMap) {
+    if (typeof text !== 'string' || text.length === 0 || !toolNameMap || toolNameMap.size === 0) {
       return text
     }
 
     let restored = text
-
-    if (toolNameMap && toolNameMap.size > 0) {
-      const orderedEntries = [...toolNameMap.entries()].sort(
-        ([leftFake], [rightFake]) => rightFake.length - leftFake.length
-      )
-
-      orderedEntries.forEach(([fake, real]) => {
-        if (fake && fake !== real && restored.includes(fake)) {
-          restored = restored.split(fake).join(real)
-        }
-      })
-    }
-
-    if (includeStatic) {
-      this.staticToolNameRewrites.forEach((replacement, prefix) => {
-        if (restored.includes(replacement)) {
-          restored = restored.split(replacement).join(prefix)
-        }
-      })
-    }
-
+    const orderedEntries = [...toolNameMap.entries()].sort(
+      ([leftAlias], [rightAlias]) => rightAlias.length - leftAlias.length
+    )
+    orderedEntries.forEach(([alias, original]) => {
+      if (alias && alias !== original && restored.includes(alias)) {
+        restored = restored.split(alias).join(original)
+      }
+    })
     return restored
   }
 
@@ -563,36 +671,28 @@ class ClaudeRelayService {
     if (responseBody.message && Array.isArray(responseBody.message.content)) {
       this._restoreToolNamesInContentBlocks(responseBody.message.content, toolNameMap)
     }
+    this._restoreToolNamesInStreamEvent(responseBody, toolNameMap)
   }
 
   _restoreToolNamesInResponseBody(responseBody, toolNameMap) {
-    if (!responseBody) {
+    if (!responseBody || !toolNameMap || toolNameMap.size === 0) {
       return responseBody
     }
 
     if (typeof responseBody === 'string') {
       try {
-        const restored = this._restoreToolNamesInText(responseBody, toolNameMap, true)
-        const parsed = JSON.parse(restored)
+        const parsed = JSON.parse(responseBody)
+        this._restoreToolNamesInResponseObject(parsed, toolNameMap)
         return JSON.stringify(parsed)
-      } catch (error) {
-        return this._restoreToolNamesInText(responseBody, toolNameMap, true)
+      } catch (_error) {
+        // 非 JSON 文本不做全局字符串替换，避免误改普通回答或工具参数值。
+        return responseBody
       }
     }
 
     if (typeof responseBody === 'object') {
-      try {
-        const restored = this._restoreToolNamesInText(
-          JSON.stringify(responseBody),
-          toolNameMap,
-          true
-        )
-        return JSON.parse(restored)
-      } catch (error) {
-        this._restoreToolNamesInResponseObject(responseBody, toolNameMap)
-      }
+      this._restoreToolNamesInResponseObject(responseBody, toolNameMap)
     }
-
     return responseBody
   }
 
@@ -622,8 +722,8 @@ class ClaudeRelayService {
     }
   }
 
-  _createToolNameStripperStreamTransformer(streamTransformer, toolNameMap, includeStatic = false) {
-    if ((!toolNameMap || toolNameMap.size === 0) && !includeStatic) {
+  _createToolNameStripperStreamTransformer(streamTransformer, toolNameMap) {
+    if (!toolNameMap || toolNameMap.size === 0) {
       return streamTransformer
     }
 
@@ -633,7 +733,26 @@ class ClaudeRelayService {
         return transformed
       }
 
-      return this._restoreToolNamesInText(transformed, toolNameMap, includeStatic)
+      return transformed
+        .split('\n')
+        .map((line) => {
+          if (!line.startsWith('data:')) {
+            return line
+          }
+          const prefix = line.startsWith('data: ') ? 'data: ' : 'data:'
+          const raw = line.slice(prefix.length)
+          if (!raw || raw === '[DONE]') {
+            return line
+          }
+          try {
+            const event = JSON.parse(raw)
+            this._restoreToolNamesInStreamEvent(event, toolNameMap)
+            return `${prefix}${JSON.stringify(event)}`
+          } catch (_error) {
+            return line
+          }
+        })
+        .join('\n')
     }
   }
 
@@ -871,7 +990,8 @@ class ClaudeRelayService {
             },
             {
               ...requestOptions,
-              isRealClaudeCodeRequest
+              isRealClaudeCodeRequest,
+              stainlessRetryCount: retryCount
             }
           )
 
@@ -994,7 +1114,11 @@ class ClaudeRelayService {
                 (req) => {
                   upstreamRequest = req
                 },
-                { ...requestOptions, isRealClaudeCodeRequest }
+                {
+                  ...requestOptions,
+                  isRealClaudeCodeRequest,
+                  stainlessRetryCount: retryCount + 1
+                }
               )
               response.accountId = accountId
               response.accountType = accountType
@@ -1483,132 +1607,209 @@ class ClaudeRelayService {
     return claudeCodeProfile.getProfile()
   }
 
-  // 📄 通用说明块文案。优先级：
-  //   1) config.claude.emulationSystemPrompt —— 专门用于覆盖该块的配置项
-  //   2) config.claude.systemPrompt          —— 历史配置项，统一化后并入本块（不再追加成额外 system 块）
-  //   3) 档案默认文案
-  // 不使用自造的固定长句（那会形成跨部署共享指纹）。
+  // 📄 system 模板严格来自 2.1.280 抓包；不再允许客户端或历史 config 覆盖，避免固定结构漂移。
   _getGenericInstructions() {
-    const candidates = [
-      config.claude && config.claude.emulationSystemPrompt,
-      config.claude && config.claude.systemPrompt
-    ]
-    for (const candidate of candidates) {
-      if (typeof candidate === 'string' && candidate.trim()) {
-        return candidate.trim()
-      }
-    }
     return this._getProfile().system.genericInstructions
   }
 
-  // 🧭 解析本次请求应声明的 Claude Code 入口类型（cli / sdk-cli…）。
-  // 客户端本身就是 Claude Code 时跟随其 UA；否则用档案默认入口。
-  _resolveEntrypoint(clientHeaders, account = null) {
-    if (account && account.claudeCodeEntrypoint) {
-      return String(account.claudeCodeEntrypoint).trim() || claudeCodeProfile.DEFAULT_ENTRYPOINT
-    }
-    const ua = this._getHeaderValueCaseInsensitive(clientHeaders, 'user-agent')
-    const fromUA = claudeCodeProfile.extractEntrypoint(ua)
-    if (fromUA) {
-      return fromUA
-    }
+  _getMainInstructions(body, account = null) {
+    const profile = this._getProfile()
+    const accountKey = (account && (account.id || account.name)) || 'relay'
+    const projectSlug = crypto
+      .createHash('sha256')
+      .update(`${accountKey}:${this._extractFirstUserText(body)}`)
+      .digest('hex')
+      .slice(0, 12)
+    const memoryDir = `/root/.claude/projects/-relay-${projectSlug}/memory/`
+    return profile.system.mainInstructions.replace(
+      profile.system.memoryDirectoryPlaceholder,
+      memoryDir
+    )
+  }
+
+  // 2.1.280 的抓包基线固定是 claude -p / sdk-cli。所有客户端统一成该入口，
+  // 不跟随客户端 UA，也不再读取 useUnifiedUserAgent 缓存，避免版本/入口分裂。
+  _resolveEntrypoint() {
     return claudeCodeProfile.DEFAULT_ENTRYPOINT
   }
 
-  // P0: build clean system blocks（identity + 通用说明）。
-  // Anthropic detects third-party apps via system content. Original client system
-  // must be moved to messages (see _moveSystemToMessages). Billing header injected
-  // later by _injectDynamicBillingHeader as system[0].
-  // cache_control 的 ttl / scope 按档案给出（2.1.280 抓包为 ttl:1h，通用块额外带 scope:global）。
-  _buildClaudeCodeSystem(_system) {
+  // 构造抓包中的 3 个静态 system block；billing 稍后 unshift 为 system[0]。
+  _buildClaudeCodeSystem(body, account = null) {
     const profile = this._getProfile()
     return [
-      { type: 'text', text: this.claudeCodeSystemPrompt },
+      { type: 'text', text: profile.system.identity },
       {
         type: 'text',
-        text: this._getGenericInstructions(),
-        cache_control: { ...profile.system.cacheControl }
+        text: profile.system.genericInstructions,
+        cache_control: { ...profile.system.genericCacheControl }
+      },
+      {
+        type: 'text',
+        text: this._getMainInstructions(body, account),
+        cache_control: { ...profile.system.mainCacheControl }
       }
     ]
   }
 
-  // P0: 把客户端原始 system 迁入 messages，避免第三方身份泄漏在 system 字段。
-  //
-  // 形态由档案 clientSystemAsSystemMessage 决定：
-  //   true  → role:"system" 条目（与 2.1.280 抓包一致，messages 中出现 role:"system"；
-  //           依赖 mid-conversation-system-2026-04-07 beta，已在该档案 beta 列表中）
-  //   false → 合并进首条 user 消息的 text block（更保守的兼容形态）
-  // 说明：此处不再插入自造的 "[System Instructions]" 前缀与固定应答句——
-  //       这两者在所有部署中字节相同，本身即构成固定指纹。
-  _moveSystemToMessages(body) {
-    if (!body || !body.system) {
-      return body
-    }
-
-    let originalText = ''
-    const system = body.system
-
-    if (typeof system === 'string') {
-      originalText = this._sanitizeSystemText(system).trim()
-    } else if (Array.isArray(system)) {
-      const parts = []
-      for (const entry of system) {
-        if (!entry) continue
-        let raw = ''
-        if (typeof entry === 'string') {
-          raw = entry.trim()
-        } else if (typeof entry === 'object' && typeof entry.text === 'string') {
-          raw = entry.text.trim()
+  _buildEnvironmentText(body, extraInstructions = []) {
+    const profile = this._getProfile()
+    const textParts = []
+    const collectText = (value) => {
+      if (typeof value === 'string') {
+        textParts.push(value)
+        return
+      }
+      if (Array.isArray(value)) {
+        value.forEach(collectText)
+        return
+      }
+      if (value && typeof value === 'object') {
+        if (typeof value.text === 'string') {
+          textParts.push(value.text)
         }
-        if (!raw || raw.startsWith('x-anthropic-billing-header')) {
-          continue
-        }
-        // 复用身份句改写：避免第三方身份（如 OpenCode）随 system 迁入 messages 后泄漏给上游
-        const t = this._sanitizeSystemText(raw).trim()
-        if (t && t !== this.claudeCodeSystemPrompt) {
-          parts.push(t)
+        if (value.content) {
+          collectText(value.content)
         }
       }
-      originalText = parts.join('\n\n')
+    }
+    collectText(body?.system)
+    collectText(body?.messages)
+    const sourceText = textParts.join('\n')
+    const cwdMatch = sourceText.match(/Primary working directory:\s*([^\n\r<]+)/i)
+    const dateMatch = sourceText.match(/Today's date is (\d{4}-\d{2}-\d{2})\./)
+    const workingDirectory = cwdMatch ? cwdMatch[1].trim() : '/workspace'
+    const clientDate = dateMatch ? dateMatch[1] : new Date().toISOString().slice(0, 10)
+    // 未提供真实 Environment 时使用 2.1.280 抓包基线值，避免暴露 relay 主机 OS/kernel/shell。
+    let text = profile.system.environmentTemplate
+      .replace('{{WORKING_DIRECTORY}}', workingDirectory)
+      .replace('{{IS_GIT_REPOSITORY}}', 'false')
+      .replace('{{PLATFORM}}', 'linux')
+      .replace('{{SHELL}}', 'bash')
+      .replace('{{OS_VERSION}}', 'Linux 5.10.134-19.8.al8.x86_64')
+      .replace(/Today's date is \d{4}-\d{2}-\d{2}\./g, `Today's date is ${clientDate}.`)
+
+    if (extraInstructions.length > 0) {
+      text += `\n\n# Client Instructions\n${extraInstructions.join('\n\n')}`
+    }
+    return text
+  }
+
+  // 把第三方客户端 system 融入 Environment message；真实 2.1.280 静态 system 模板随后重建。
+  // 第一轮抓包顺序固定为 user → system(Environment)，因此插在首个 user 后而不是 prepend。
+  _moveSystemToMessages(body) {
+    if (!body || typeof body !== 'object') {
+      return body
     }
 
-    // Skip if no meaningful content or already pure Claude Code identity
-    if (!originalText || originalText === this.claudeCodeSystemPrompt.trim()) {
-      return body
+    const profile = this._getProfile()
+    const canonicalStarts = [
+      profile.system.identity.trim(),
+      profile.system.genericInstructions.trim(),
+      profile.system.mainInstructions.trim().slice(0, 160)
+    ]
+    const extraInstructions = []
+    const appendText = (raw) => {
+      if (typeof raw !== 'string') {
+        return
+      }
+      const trimmed = raw.trim()
+      if (!trimmed || trimmed.startsWith('x-anthropic-billing-header')) {
+        return
+      }
+      if (canonicalStarts.some((text) => trimmed === text || trimmed.startsWith(text))) {
+        return
+      }
+      const text = this._sanitizeSystemText(trimmed).trim()
+      if (text && text !== profile.system.identity) {
+        extraInstructions.push(text)
+      }
+    }
+
+    if (typeof body.system === 'string') {
+      appendText(body.system)
+    } else if (Array.isArray(body.system)) {
+      body.system.forEach((entry) => appendText(typeof entry === 'string' ? entry : entry?.text))
     }
 
     if (!Array.isArray(body.messages)) {
       body.messages = []
     }
-
-    if (this._getProfile().clientSystemAsSystemMessage) {
-      body.messages = [
-        { role: 'system', content: [{ type: 'text', text: originalText }] },
-        ...body.messages
-      ]
+    const firstUserIndex = body.messages.findIndex((message) => message?.role === 'user')
+    const environmentIndex = body.messages.findIndex(
+      (message) =>
+        message?.role === 'system' &&
+        ((typeof message.content === 'string' && message.content.startsWith('# Environment')) ||
+          (Array.isArray(message.content) &&
+            message.content.some(
+              (block) => typeof block?.text === 'string' && block.text.startsWith('# Environment')
+            )))
+    )
+    if (environmentIndex >= 0) {
+      const environmentMessage = body.messages[environmentIndex]
+      if (extraInstructions.length > 0) {
+        const suffix = `\n\n# Client Instructions\n${extraInstructions.join('\n\n')}`
+        if (typeof environmentMessage.content === 'string') {
+          environmentMessage.content += suffix
+        } else if (Array.isArray(environmentMessage.content)) {
+          const textBlock = environmentMessage.content.find(
+            (block) => typeof block?.text === 'string'
+          )
+          if (textBlock) {
+            textBlock.text += suffix
+          }
+        }
+      }
+      if (firstUserIndex >= 0 && environmentIndex !== firstUserIndex + 1) {
+        body.messages.splice(environmentIndex, 1)
+        const updatedUserIndex = body.messages.findIndex((message) => message?.role === 'user')
+        body.messages.splice(updatedUserIndex + 1, 0, environmentMessage)
+      }
       return body
     }
 
-    // 保守形态：并入首条 user 消息（无 user 消息时新建一条）
-    const firstUser = body.messages.find((m) => m && m.role === 'user')
-    if (firstUser) {
-      if (typeof firstUser.content === 'string') {
-        firstUser.content = [
-          { type: 'text', text: originalText },
-          { type: 'text', text: firstUser.content }
-        ]
-      } else if (Array.isArray(firstUser.content)) {
-        firstUser.content = [{ type: 'text', text: originalText }, ...firstUser.content]
-      } else {
-        firstUser.content = [{ type: 'text', text: originalText }]
-      }
-    } else {
-      body.messages = [
-        { role: 'user', content: [{ type: 'text', text: originalText }] },
-        ...body.messages
-      ]
+    const environmentBlock = {
+      type: 'text',
+      text: this._buildEnvironmentText(body, extraInstructions),
+      cache_control: { ...profile.system.environmentCacheControl }
     }
+    const insertAt = firstUserIndex >= 0 ? firstUserIndex + 1 : body.messages.length
+    body.messages.splice(insertAt, 0, { role: 'system', content: [environmentBlock] })
     return body
+  }
+
+  _normalizeInitialUserMessage(body) {
+    if (!Array.isArray(body?.messages)) {
+      return
+    }
+    const firstUser = body.messages.find((message) => message?.role === 'user')
+    if (!firstUser) {
+      return
+    }
+    const content = Array.isArray(firstUser.content)
+      ? firstUser.content
+      : [{ type: 'text', text: String(firstUser.content || '') }]
+    const hasToolResult = content.some((block) => block?.type === 'tool_result')
+    if (hasToolResult || content.length >= 3) {
+      firstUser.content = content
+      return
+    }
+    const existingTexts = new Set(
+      content
+        .filter((block) => block?.type === 'text' && typeof block.text === 'string')
+        .map((block) => block.text)
+    )
+    const profilePreludes = safeClone(this._getProfile().userPreludeBlocks)
+    const availablePreludes = profilePreludes.filter((block) => !existingTexts.has(block.text))
+    const needed = Math.max(0, 3 - content.length)
+    while (availablePreludes.length < needed) {
+      availablePreludes.push(
+        safeClone(profilePreludes[availablePreludes.length % profilePreludes.length])
+      )
+    }
+    firstUser.content = [
+      ...availablePreludes.slice(0, needed),
+      ...content.filter((block) => block && typeof block === 'object')
+    ]
   }
 
   // 🔤 提取 messages 中第一条 role=user 消息的首段 text（兼容 string / block[] 两种 content）。
@@ -1689,8 +1890,9 @@ class ClaudeRelayService {
   }
 
   // 🆔 emulation 会话标识。
-  // 真实 CLI 中 X-Claude-Code-Session-Id、X-Mcp-Client-Session-Id、metadata.user_id.session_id
-  // 三者为同一个 UUID。这里以 sessionHelper 的会话哈希（与 sticky 会话同源）为主种子，
+  // /v1/messages 中 X-Claude-Code-Session-Id 与 metadata.user_id.session_id 为同一个 UUID；
+  // X-Mcp-Client-Session-Id 只出现在 MCP 请求，不属于本路由的 24 个 header。
+  // 这里以 sessionHelper 的会话哈希（与 sticky 会话同源）为主种子，
   // 保证同一会话稳定；header 与 body 均取自该值，不再各自随机。
   // 注意：必须以「未被改写的原始请求体」调用，否则 _moveSystemToMessages 会改变哈希。
   _getEmulationSessionId(body, account = null) {
@@ -1740,6 +1942,20 @@ class ClaudeRelayService {
     }
   }
 
+  async _getPreviousToolDurationsHeader(sessionId) {
+    const state = await this._getPreviousTurnState(sessionId)
+    if (!state || !Array.isArray(state.toolNames) || !state.toolStartedAt) {
+      return null
+    }
+    const elapsedMs = Math.max(0, Math.min(Date.now() - Number(state.toolStartedAt), 999999))
+    const uniqueNames = [
+      ...new Set(state.toolNames.filter((name) => typeof name === 'string' && name))
+    ]
+    return uniqueNames.length > 0
+      ? uniqueNames.map((name) => `${name}=${elapsedMs}`).join(',')
+      : null
+  }
+
   // 🔗 从上游非流式响应中提取本轮 request-id / message id 并落库
   // （供同会话下一轮的 cc_prev_req / diagnostics.previous_message_id 使用）
   async _captureTurnStateFromResponse(body, upstreamHeaders, responseBody) {
@@ -1750,16 +1966,26 @@ class ClaudeRelayService {
       }
       const requestId = (upstreamHeaders && upstreamHeaders['request-id']) || null
       let messageId = null
+      let toolNames = []
       if (typeof responseBody === 'string' && responseBody.trim()) {
         try {
           const parsed = JSON.parse(responseBody)
           messageId = (parsed && parsed.id) || null
+          toolNames = Array.isArray(parsed?.content)
+            ? parsed.content
+                .filter((block) => block?.type === 'tool_use' && typeof block.name === 'string')
+                .map((block) => block.name)
+            : []
         } catch (_e) {
           messageId = null
         }
       }
-      if (requestId || messageId) {
-        await this._saveTurnState(sessionId, { requestId, messageId })
+      if (requestId || messageId || toolNames.length > 0) {
+        await this._saveTurnState(sessionId, {
+          requestId,
+          messageId,
+          ...(toolNames.length > 0 ? { toolNames, toolStartedAt: Date.now() } : {})
+        })
       }
     } catch (error) {
       logger.debug(`🎫 Failed to capture turn state: ${error.message}`)
@@ -1893,48 +2119,8 @@ class ClaudeRelayService {
     // 不在此处写死；fallbacks 依旧不注入（sonnet 不支持，注入会 400）。
   }
 
-  // 🔄 处理请求体
-  // 📅 Rewrite "Today's date is YYYY-MM-DD." (or YYYY/MM/DD) inside system + user messages
-  // to reflect the CURRENT SERVER LOCAL DATE. Strictly emits YYYY-MM-DD.
-  _rewriteTodayDate(body) {
-    if (!body || typeof body !== 'object') {
-      return
-    }
-    const serverDate = new Date().toLocaleDateString('en-CA') // en-CA gives YYYY-MM-DD, uses system TZ
-    const replacement = "Today's date is " + serverDate + '.'
-    // Accept both YYYY-MM-DD and YYYY/MM/DD, with any whitespace between tokens
-    const dateRegex = /Today's date is \d{4}[-/]\d{2}[-/]\d{2}\./g
-    const rewriteText = (t) => (typeof t === 'string' ? t.replace(dateRegex, replacement) : t)
-    // system entries
-    if (Array.isArray(body.system)) {
-      for (const entry of body.system) {
-        if (entry && typeof entry.text === 'string') {
-          entry.text = rewriteText(entry.text)
-        }
-      }
-    } else if (typeof body.system === 'string') {
-      body.system = rewriteText(body.system)
-    }
-    // messages content blocks
-    if (Array.isArray(body.messages)) {
-      for (const msg of body.messages) {
-        if (!msg) continue
-        const content = msg.content
-        if (typeof content === 'string') {
-          msg.content = rewriteText(content)
-        } else if (Array.isArray(content)) {
-          for (const block of content) {
-            if (block && typeof block.text === 'string') {
-              block.text = rewriteText(block.text)
-            }
-          }
-        }
-      }
-    }
-  }
-
   // 注：第 3 个参数保留仅为签名兼容（历史调用方/测试会传），统一化后不再影响任何行为。
-  _processRequestBody(body, account = null, _isRealClaudeCodeOverride = undefined, context = {}) {
+  _processRequestBody(body, account = null, _isRealClaudeCodeOverride = undefined, _context = {}) {
     if (!body) {
       return body
     }
@@ -1945,16 +2131,14 @@ class ClaudeRelayService {
 
     // 使用 safeClone 替代 JSON.parse(JSON.stringify()) 提升性能
     const processedBody = safeClone(body)
-    // 🕰️ Overwrite any "Today's date is …" strings with server local date (strict YYYY-MM-DD.)
-    this._rewriteTodayDate(processedBody)
 
     processedBody.messages = this._patchOrphanedToolUse(processedBody.messages)
 
     // 验证并限制max_tokens参数
     this._validateAndLimitMaxTokens(processedBody)
 
-    // 移除cache_control中的ttl字段
-    this._stripTtlFromCacheControl(processedBody)
+    // 2.1.280 的 system / Environment cache anchor 明确携带 ttl:"1h"；
+    // 不再执行历史兼容逻辑 _stripTtlFromCacheControl，避免把真实字段剥掉。
 
     // 🔒 统一化：不再区分「真 Claude Code 客户端 / 第三方客户端」。
     // 所有请求一律走同一套归一化 + 转发逻辑，禁止透传——真 CC 客户端自带的 system
@@ -1962,9 +2146,10 @@ class ClaudeRelayService {
     // 注：识别真 CC 客户端的能力仍然保留，但只用于从真客户端学习 header 缓存
     // （见 storeAccountHeaders），不再影响任何转发行为。
 
-    // P0: Move client system to messages FIRST, then build clean CC system
+    // P0: Move client system to messages FIRST, then build the exact 2.1.280 four-block system
     this._moveSystemToMessages(processedBody)
-    processedBody.system = this._buildClaudeCodeSystem(processedBody.system)
+    this._normalizeInitialUserMessage(processedBody)
+    processedBody.system = this._buildClaudeCodeSystem(processedBody, account)
     this._applyNonRealClaudeCodeDefaults(processedBody)
     this._sanitizeNonRealClaudeCodeToolDescriptions(processedBody)
 
@@ -2002,26 +2187,15 @@ class ClaudeRelayService {
     // 对齐真实 CLI v2.1.280（cc_version 后缀随首条 user 文本每请求变化，消除固定指纹特征；
     // cc_entrypoint / cc_turn_origin 跟随本次请求声明的入口，cch 不传递）。
     this._injectDynamicBillingHeader(processedBody, {
-      entrypoint: context.entrypoint,
+      entrypoint: claudeCodeProfile.DEFAULT_ENTRYPOINT,
       sessionId: emulationSessionId,
       account
     })
 
     this._enforceCacheControlLimit(processedBody)
 
-    // 统一化：system 固定为 [billing, identity, generic] 形态，不再把 relay 的
-    // config.claude.systemPrompt 追加成额外 system 块（如需自定义，见 _getGenericInstructions）。
-    // 仅保留兜底清理：system 若无有效内容则删除。
-    if (processedBody.system && Array.isArray(processedBody.system)) {
-      const hasValidContent = processedBody.system.some(
-        (item) => item && item.text && item.text.trim()
-      )
-      if (!hasValidContent) {
-        delete processedBody.system
-      }
-    }
-
-    this._injectClaudeCodeStyleCacheControl(processedBody)
+    // 统一化：system 固定为 [billing, identity, generic, main]；messages 的 cache anchor
+    // 已在 _moveSystemToMessages 中按抓包设置，不再给 user 消息或 tools 注入额外 cache_control。
     this._enforceCacheControlLimit(processedBody)
 
     // Claude API只允许temperature或top_p其中之一，优先使用temperature
@@ -2423,19 +2597,31 @@ class ClaudeRelayService {
       return
     }
 
+    const walkMessageContent = (value, visitor) => {
+      if (Array.isArray(value)) {
+        value.forEach((item) => walkMessageContent(item, visitor))
+        return
+      }
+      if (!value || typeof value !== 'object') {
+        return
+      }
+      visitor(value)
+      if (value.content) {
+        walkMessageContent(value.content, visitor)
+      }
+      if (value.tool) {
+        walkMessageContent(value.tool, visitor)
+      }
+    }
+
     const countCacheControlBlocks = () => {
       let total = 0
 
       if (Array.isArray(body.messages)) {
-        body.messages.forEach((message) => {
-          if (!message || !Array.isArray(message.content)) {
-            return
+        walkMessageContent(body.messages, (item) => {
+          if (item.cache_control) {
+            total += 1
           }
-          message.content.forEach((item) => {
-            if (item && item.cache_control) {
-              total += 1
-            }
-          })
         })
       }
 
@@ -2458,29 +2644,19 @@ class ClaudeRelayService {
       return total
     }
 
-    // 只移除 cache_control 属性，保留内容本身，避免丢失用户消息
+    // 只移除 cache_control 属性，保留内容本身；递归覆盖 tool_result.content 等嵌套块。
     const removeCacheControlFromMessages = () => {
       if (!Array.isArray(body.messages)) {
         return false
       }
-
-      for (let messageIndex = 0; messageIndex < body.messages.length; messageIndex += 1) {
-        const message = body.messages[messageIndex]
-        if (!message || !Array.isArray(message.content)) {
-          continue
+      let removed = false
+      walkMessageContent(body.messages, (item) => {
+        if (!removed && item.cache_control) {
+          delete item.cache_control
+          removed = true
         }
-
-        for (let contentIndex = 0; contentIndex < message.content.length; contentIndex += 1) {
-          const contentItem = message.content[contentIndex]
-          if (contentItem && contentItem.cache_control) {
-            // 只删除 cache_control 属性，保留内容
-            delete contentItem.cache_control
-            return true
-          }
-        }
-      }
-
-      return false
+      })
+      return removed
     }
 
     // 只移除 cache_control 属性，保留 system 内容
@@ -2570,11 +2746,57 @@ class ClaudeRelayService {
     }
   }
 
-  // 🔧 过滤客户端请求头
-  _filterClientHeaders(clientHeaders) {
-    // 使用统一的 headerFilter 工具类
-    // 同时伪装成正常的直接客户端请求，避免触发上游 API 的安全检查
-    return filterForClaude(clientHeaders)
+  _normalizeMessageCacheControls(body) {
+    if (!Array.isArray(body?.messages)) {
+      return
+    }
+    body.messages.forEach((message) => {
+      if (!Array.isArray(message?.content)) {
+        return
+      }
+      message.content.forEach((block) => {
+        if (block && typeof block === 'object') {
+          delete block.cache_control
+        }
+      })
+      if (message.role === 'system' && message.content.length > 0) {
+        const lastBlock = message.content[message.content.length - 1]
+        if (lastBlock && typeof lastBlock === 'object') {
+          lastBlock.cache_control = { type: 'ephemeral', ttl: '1h' }
+        }
+      }
+    })
+  }
+
+  _buildCanonicalClaudeCodeBody(body) {
+    const profile = this._getProfile()
+    const source = body && typeof body === 'object' ? body : {}
+    const defaults = {
+      messages: [],
+      system: [],
+      tools: [],
+      metadata: {},
+      max_tokens: profile.body.defaultMaxTokens,
+      thinking: safeClone(profile.body.thinking),
+      context_management: safeClone(profile.body.contextManagement),
+      output_config: safeClone(profile.body.outputConfig),
+      diagnostics: { previous_message_id: null },
+      stream: true
+    }
+    const canonical = {}
+    profile.body.topLevelOrder.forEach((key) => {
+      if (source[key] !== undefined) {
+        canonical[key] = source[key]
+      } else if (defaults[key] !== undefined) {
+        canonical[key] = defaults[key]
+      }
+    })
+    return canonical
+  }
+
+  _getProfileHeader(headers, name, fallback) {
+    const value = this._getHeaderValueCaseInsensitive(headers, name)
+    return value === undefined || value === null || value === '' ? fallback : String(value)
   }
 
   // 🗜️ 根据 content-encoding 创建解压流（支持 gzip/deflate/br/zstd；Node 22.15+/24 内置 zstd）
@@ -2687,7 +2909,7 @@ class ClaudeRelayService {
     return transform
   }
 
-  // 🔧 准备请求头和 payload（抽离公共逻辑）
+  // 🔧 准备严格对齐 2.1.280 的请求头和 payload。
   async _prepareRequestHeadersAndPayload(
     body,
     clientHeaders,
@@ -2696,147 +2918,88 @@ class ClaudeRelayService {
     options = {}
   ) {
     const { account, accountType, sessionHash, requestOptions = {}, isStream = false } = options
-
-    // 获取统一的 User-Agent
-    const unifiedUA = await this.captureAndGetUnifiedUserAgent(clientHeaders, account)
-
-    // 获取过滤后的客户端 headers
-    const filteredHeaders = this._filterClientHeaders(clientHeaders)
-
-    // 🔒 统一化：所有请求（包括真 Claude Code 客户端）一律使用精确、版本自洽的 CLI header 集合，
-    // 不再做客户端 header 透传。识别真 CC 客户端仅用于 header 缓存学习（storeAccountHeaders）。
-    let finalHeaders = { ...filteredHeaders }
     let requestPayload = body
 
-    // P2：只发送精确、版本自洽的 CLI header 集合。
-    // 优先使用账号 Redis 缓存中「与当前声明 UA 同版本」的真实抓取 headers；
-    // 否则回退到 canonical defaultHeaders（已与原生 CLI v2.1.280 抓包字节对齐）。
-    // 关键：不沿用旧版本缓存（避免 x-stainless 与 UA 版本错位），也不保留客户端多余头。
-    const declaredVersion = claudeCodeHeadersService.extractVersionFromUserAgent(
-      claudeCodeHeadersService.defaultHeaders['user-agent']
-    )
-    const cachedHeaders = await claudeCodeHeadersService.getAccountHeaders(accountId)
-    const cachedVersion = claudeCodeHeadersService.extractVersionFromUserAgent(
-      cachedHeaders && cachedHeaders['user-agent']
-    )
-    // 仅当缓存版本恰好等于当前声明版本时才采用缓存（真实同版本抓取），否则用 default。
-    const emulationHeaders =
-      cachedVersion && declaredVersion && cachedVersion === declaredVersion
-        ? cachedHeaders
-        : claudeCodeHeadersService.defaultHeaders
-
-    // 用精确集合覆盖客户端遗留头：先删除已知的非 CLI 泄漏头，再仅注入 CLI header keys。
-    const CLI_HEADER_KEYS = claudeCodeHeadersService.claudeCodeHeaderKeys
-    const LEAK_HEADERS = [
-      'accept-language',
-      'sec-fetch-mode',
-      'sec-fetch-site',
-      'sec-fetch-dest',
-      'sec-ch-ua',
-      'sec-ch-ua-mobile',
-      'sec-ch-ua-platform',
-      'x-stainless-helper-method'
-    ]
-    LEAK_HEADERS.forEach((k) => {
-      delete finalHeaders[k]
-      delete finalHeaders[k.toLowerCase()]
-    })
-    CLI_HEADER_KEYS.forEach((key) => {
-      if (emulationHeaders[key] !== undefined) {
-        finalHeaders[key] = emulationHeaders[key]
+    // 身份扩展只允许改 body / 中止请求；其 header 输出不会进入上游，避免形成旁路透传。
+    const extensionResult = this._applyRequestIdentityTransform(
+      requestPayload,
+      {},
+      {
+        account,
+        accountId,
+        accountType,
+        sessionHash,
+        clientHeaders,
+        requestOptions,
+        isStream
       }
-    })
-
-    // 🧭 UA 入口类型跟随客户端（sdk-cli / cli），避免 UA 与 billing header 的
-    // cc_entrypoint / cc_turn_origin 相互错位。
-    const emulationEntrypoint = this._resolveEntrypoint(clientHeaders, account)
-    finalHeaders['user-agent'] = claudeCodeProfile.buildUserAgent(emulationEntrypoint)
-
-    // 🏷️ 2.1.280 抓包中存在、此前完全缺失的固定头 + 每请求 id
-    const profile = this._getProfile()
-    Object.entries(profile.staticHeaders || {}).forEach(([key, value]) => {
-      finalHeaders[key] = value
-    })
-    finalHeaders['x-client-request-id'] = crypto.randomUUID()
-
-    // 🆔 会话 id 与 body.metadata.user_id.session_id 保持同值
-    // （真实 CLI：X-Claude-Code-Session-Id === X-Mcp-Client-Session-Id === metadata.user_id.session_id）。
-    // 以 body 中已写入的值为准，确保「发出去的 body 与 header」自洽。
-    const emulationSessionId =
-      metadataUserIdHelper.extractSessionId(requestPayload?.metadata?.user_id) ||
-      this._getEmulationSessionId(requestPayload, account)
-    finalHeaders['x-claude-code-session-id'] = emulationSessionId
-
-    // 应用请求身份转换
-    const extensionResult = this._applyRequestIdentityTransform(requestPayload, finalHeaders, {
-      account,
-      accountId,
-      accountType,
-      sessionHash,
-      clientHeaders,
-      requestOptions,
-      isStream
-    })
-
+    )
     if (extensionResult.abortResponse) {
       return { abortResponse: extensionResult.abortResponse }
     }
-
     requestPayload = extensionResult.body
-    finalHeaders = extensionResult.headers
 
-    // 统一化：工具描述清洗（幂等）与工具名改写对所有请求生效
     this._sanitizeNonRealClaudeCodeToolDescriptions(requestPayload)
-    const toolNameMap = this._transformToolNamesInRequestBody(requestPayload, {
-      useRandomizedToolNames: requestOptions.useRandomizedToolNames === true
-    })
+    const toolNameMap = this._transformToolNamesInRequestBody(requestPayload)
+    this._normalizeMessageCacheControls(requestPayload)
+    this._enforceCacheControlLimit(requestPayload)
+    requestPayload = this._buildCanonicalClaudeCodeBody(requestPayload)
 
-    // 序列化请求体，计算 content-length
     const bodyString = JSON.stringify(requestPayload)
     const contentLength = Buffer.byteLength(bodyString, 'utf8')
+    const profile = this._getProfile()
+    const defaults = claudeCodeHeadersService.defaultHeaders
+    const sessionId =
+      metadataUserIdHelper.extractSessionId(requestPayload.metadata?.user_id) ||
+      this._getEmulationSessionId(requestPayload, account)
+    const retryCount = Math.max(0, Number(requestOptions.stainlessRetryCount) || 0)
+    const previousToolDurations = await this._getPreviousToolDurationsHeader(sessionId)
 
-    // 构建最终请求头（包含认证、版本、User-Agent、Beta 等）
-    // 与真实 Claude Code 一致地协商压缩编码（避免 identity 成为指纹破绽）。
-    // Node 22.15+/24 的 zlib 已内置 zstd，响应侧 _createAdaptiveDecompressStream /
-    // _decompressBufferSync 支持 gzip/deflate/br/zstd，并在上游漏发 Content-Encoding 头时
-    // 按魔数嗅探兜底（历史 issue #1030 的二进制损坏问题已由嗅探逻辑覆盖）。
-    const ACCEPT_ENCODING = 'gzip, deflate, br, zstd'
+    // 字段插入顺序与大小写严格匹配 2.1.280 抓包。
     const headers = {
-      host: 'api.anthropic.com',
-      connection: 'keep-alive',
-      'content-type': 'application/json',
-      'content-length': String(contentLength),
-      'accept-encoding': ACCEPT_ENCODING,
-      authorization: `Bearer ${accessToken}`,
-      'anthropic-version': this.apiVersion,
-      ...finalHeaders
+      Accept: 'application/json',
+      Authorization: `Bearer ${accessToken}`,
+      'Content-Type': 'application/json',
+      'User-Agent': claudeCodeProfile.buildUserAgent(),
+      'X-Claude-Code-Session-Id': sessionId,
+      'X-Stainless-Arch': this._getProfileHeader(defaults, 'x-stainless-arch', 'x64'),
+      'X-Stainless-Lang': this._getProfileHeader(defaults, 'x-stainless-lang', 'js'),
+      'X-Stainless-OS': this._getProfileHeader(defaults, 'x-stainless-os', 'Linux'),
+      'X-Stainless-Package-Version': this._getProfileHeader(
+        defaults,
+        'x-stainless-package-version',
+        '0.112.1'
+      ),
+      'X-Stainless-Retry-Count': String(retryCount),
+      'X-Stainless-Runtime': this._getProfileHeader(defaults, 'x-stainless-runtime', 'node'),
+      'X-Stainless-Runtime-Version': this._getProfileHeader(
+        defaults,
+        'x-stainless-runtime-version',
+        'v26.3.0'
+      ),
+      'X-Stainless-Timeout': this._getProfileHeader(defaults, 'x-stainless-timeout', '600'),
+      'anthropic-beta': profile.betas.join(','),
+      'anthropic-dangerous-direct-browser-access': 'true',
+      'anthropic-dispatch-id': profile.staticHeaders['anthropic-dispatch-id'],
+      'anthropic-version': profile.apiVersion,
+      'x-app': 'cli'
     }
-
-    // finalHeaders 可能携带客户端或 Redis 缓存中的 accept-encoding，统一覆盖为
-    // 我们确定能解压的编码集合，保证 spread 后值稳定
-    headers['accept-encoding'] = ACCEPT_ENCODING
-
-    // 使用统一 User-Agent 或客户端提供的，最后使用档案默认 UA
-    const userAgent =
-      unifiedUA ||
-      headers['user-agent'] ||
-      claudeCodeProfile.buildUserAgent(this._resolveEntrypoint(clientHeaders, account))
-    const acceptHeader = headers['accept'] || 'application/json'
-    delete headers['user-agent']
-    delete headers['accept']
-    headers['User-Agent'] = userAgent
-    headers['Accept'] = acceptHeader
+    if (previousToolDurations) {
+      headers['x-claude-code-prev-tool-durations'] = previousToolDurations
+    }
+    headers['x-claude-code-request-class'] = profile.staticHeaders['x-claude-code-request-class']
+    headers['x-client-request-id'] = crypto.randomUUID()
+    headers.Connection = 'keep-alive'
+    headers.Host = 'api.anthropic.com'
+    headers['Accept-Encoding'] = 'gzip, deflate, br, zstd'
+    headers['Content-Length'] = String(contentLength)
 
     logger.debug(`🔗 Request User-Agent: ${headers['User-Agent']}`)
-
-    // anthropic-beta：固定使用档案集合，不合并客户端声明（禁止透传）
-    headers['anthropic-beta'] = this._getBetaHeader()
 
     return {
       requestPayload,
       bodyString,
       headers,
-      // 统一化后所有请求都经过伪装/改写，故恒为 true（响应侧据此做工具名反向还原等对称处理）
       emulationApplied: true,
       toolNameMap
     }
@@ -2946,7 +3109,9 @@ class ClaudeRelayService {
               'utf8'
             )
 
+            // 先记录 upstream 原始工具名（如 Read），再向客户端还原成原工具名。
             if (emulationApplied) {
+              await this._captureTurnStateFromResponse(body, res.headers, responseBody)
               responseBody = this._restoreToolNamesInResponseBody(responseBody, toolNameMap)
             }
 
@@ -2957,11 +3122,6 @@ class ClaudeRelayService {
             }
 
             logger.debug(`🔗 Claude API response: ${res.statusCode}`)
-
-            // 🔗 emulation：记录本轮 request-id / message id，供同会话下一轮链式引用
-            if (emulationApplied) {
-              await this._captureTurnStateFromResponse(body, res.headers, responseBody)
-            }
 
             resolve(response)
           } catch (error) {
@@ -3317,7 +3477,7 @@ class ClaudeRelayService {
         account,
         accountType,
         sessionHash,
-        requestOptions,
+        requestOptions: { ...requestOptions, stainlessRetryCount: retryCount },
         isStream: true
       }
     )
@@ -3906,6 +4066,9 @@ class ClaudeRelayService {
           ? metadataUserIdHelper.extractSessionId(body?.metadata?.user_id)
           : null
         const upstreamRequestId = (res.headers && res.headers['request-id']) || null
+        let capturedMessageId = null
+        const capturedToolNames = []
+        let capturedToolStartedAt = null
 
         // 🔧 处理上游压缩：Anthropic (经 Cloudflare) 可能返回 gzip/deflate/br/zstd 压缩响应；
         // Content-Encoding 头缺失时由自适应流按首块魔数嗅探（兜底 issue #1030）
@@ -4007,13 +4170,18 @@ class ClaudeRelayService {
                       JSON.stringify(currentUsageData)
                     )
 
-                    // 🔗 emulation：记录本轮 request-id / message id，供同会话下一轮链式引用
-                    if (emulationSessionId) {
-                      this._saveTurnState(emulationSessionId, {
-                        requestId: upstreamRequestId,
-                        messageId: data.message.id || null
-                      }).catch(() => {})
-                    }
+                    capturedMessageId = data.message.id || null
+                  }
+
+                  // 只在内存中累计本轮状态，stream end 时一次性写 Redis，避免多个异步写互相覆盖。
+                  if (
+                    data.type === 'content_block_start' &&
+                    data.content_block?.type === 'tool_use' &&
+                    typeof data.content_block.name === 'string' &&
+                    emulationSessionId
+                  ) {
+                    capturedToolNames.push(data.content_block.name)
+                    capturedToolStartedAt = capturedToolStartedAt || Date.now()
                   }
 
                   // message_delta包含最终的output tokens
@@ -4090,6 +4258,19 @@ class ClaudeRelayService {
               } else {
                 responseStream.write(buffer)
               }
+            }
+
+            if (emulationSessionId && (upstreamRequestId || capturedMessageId)) {
+              await this._saveTurnState(emulationSessionId, {
+                requestId: upstreamRequestId,
+                messageId: capturedMessageId,
+                ...(capturedToolNames.length > 0
+                  ? {
+                      toolNames: [...new Set(capturedToolNames)],
+                      toolStartedAt: capturedToolStartedAt
+                    }
+                  : {})
+              })
             }
 
             // 确保流正确结束

@@ -1,6 +1,6 @@
 {
   "name": "claude-relay-service",
-  "version": "2.0.12",
+  "version": "2.0.13",
   "description": "Claude Code API relay service with multi-account management, OpenAI compatibility, and API key authentication",
   "main": "src/app.js",
   "scripts": {

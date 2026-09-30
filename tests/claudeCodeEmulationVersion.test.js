@@ -84,7 +84,7 @@ const buildBody = (firstUserText) => ({
 describe('Claude Code emulation version (v2.1.280)', () => {
   it('defaultHeaders user-agent declares claude-cli/2.1.280', () => {
     const ua = claudeCodeHeadersService.defaultHeaders['user-agent']
-    expect(ua).toBe(`claude-cli/${EXPECTED_VERSION} (external, cli)`)
+    expect(ua).toBe(`claude-cli/${EXPECTED_VERSION} (external, sdk-cli)`)
     expect(claudeCodeHeadersService.extractVersionFromUserAgent(ua)).toBe(EXPECTED_VERSION)
   })
 
@@ -112,8 +112,8 @@ describe('Claude Code emulation version (v2.1.280)', () => {
     const match = body.system[0].text.match(BILLING_RE)
     expect(match).not.toBeNull()
     expect(match[1]).toBe(EXPECTED_VERSION)
-    expect(match[3]).toBe('cli')
-    expect(match[5]).toBe('cli')
+    expect(match[3]).toBe('sdk-cli')
+    expect(match[5]).toBe('sdk')
     expect(body.system[0].text).not.toContain('cch=')
     // 首轮不应出现 cc_prev_req（链式引用由 _applyTurnChaining 在后续轮次补）
     expect(body.system[0].text).not.toContain('cc_prev_req=')
@@ -188,6 +188,39 @@ describe('Claude Code emulation version (v2.1.280)', () => {
     expect(profile.staticHeaders['x-claude-code-request-class']).toBe('main')
   })
 
+  it('captured profile 包含真实 identity/generic/main 与 12 个工具定义', () => {
+    const profile = claudeCodeProfile.getProfile()
+    expect(profile.system.identity).toBe(
+      "You are a Claude agent, built on Anthropic's Claude Agent SDK."
+    )
+    expect(profile.system.identity).toHaveLength(62)
+    expect(profile.system.genericInstructions).toHaveLength(1584)
+    expect(profile.system.mainInstructions.length).toBeGreaterThan(4800)
+    expect(profile.tools.map((tool) => tool.name)).toEqual([
+      'Agent',
+      'Bash',
+      'Edit',
+      'ListAgents',
+      'Read',
+      'ReportFindings',
+      'ScheduleWakeup',
+      'Skill',
+      'ToolSearch',
+      'DeferredToolPlaceholder',
+      'Write',
+      'advisor'
+    ])
+    expect(profile.tools.find((tool) => tool.name === 'Bash').eager_input_streaming).toBe(true)
+    expect(
+      profile.tools.find((tool) => tool.name === 'DeferredToolPlaceholder').defer_loading
+    ).toBe(true)
+    expect(profile.tools.find((tool) => tool.name === 'advisor')).toMatchObject({
+      type: 'advisor_20260301',
+      model: 'claude-opus-5-5',
+      defer_loading: true
+    })
+  })
+
   it('body 默认值对齐：不发 temperature、thinking 带 display、注入 output_config', () => {
     const body = buildBody('body defaults payload')
     body.temperature = 0.7
@@ -206,10 +239,12 @@ describe('Claude Code emulation version (v2.1.280)', () => {
   it('system 块带 ttl/scope，且不含自造的固定文案', () => {
     const blocks = claudeRelayService._buildClaudeCodeSystem(null)
 
-    expect(blocks).toHaveLength(2)
+    expect(blocks).toHaveLength(3)
     expect(blocks[0].text).toBe(claudeCodeProfile.getProfile().system.identity)
     expect(blocks[1].cache_control).toEqual({ type: 'ephemeral', ttl: '1h', scope: 'global' })
     expect(blocks[1].text).toBe(claudeCodeProfile.getProfile().system.genericInstructions)
+    expect(blocks[2].cache_control).toEqual({ type: 'ephemeral', ttl: '1h' })
+    expect(blocks[2].text).toContain('<total_tokens>15000000 tokens left</total_tokens>')
     // 自造的 expansion 常量必须已从服务上移除（它是跨部署共享的固定指纹）
     expect(claudeRelayService.claudeCodeSystemPromptExpansion).toBeUndefined()
   })
@@ -225,8 +260,131 @@ describe('Claude Code emulation version (v2.1.280)', () => {
     const flattened = JSON.stringify(body.messages)
     expect(flattened).not.toContain('[System Instructions]')
     expect(flattened).not.toContain('Understood. I will follow these instructions.')
-    expect(body.messages[0].role).toBe('system')
-    expect(body.messages[0].content[0].text).toBe('third party system instructions')
+    expect(body.messages[0].role).toBe('user')
+    expect(body.messages[1].role).toBe('system')
+    expect(body.messages[1].content[0].text.startsWith('# Environment')).toBe(true)
+    expect(body.messages[1].content[0].text).toContain(
+      '# Client Instructions\nthird party system instructions'
+    )
+    expect(body.messages[1].content[0].cache_control).toEqual({ type: 'ephemeral', ttl: '1h' })
+  })
+
+  it('请求没有 system 时仍构造 user → system(Environment) 的首轮消息结构', () => {
+    const body = {
+      model: 'claude-opus-5-5',
+      messages: [{ role: 'user', content: [{ type: 'text', text: 'hello' }] }]
+    }
+
+    const processed = claudeRelayService._processRequestBody(body, { id: 'acct-env' }, false)
+
+    expect(processed.messages.map((message) => message.role)).toEqual(['user', 'system'])
+    expect(processed.messages[0].content).toHaveLength(3)
+    expect(processed.messages[0].content[0].text.startsWith('<system-reminder>')).toBe(true)
+    expect(processed.messages[0].content[1].text.startsWith('<system-reminder>')).toBe(true)
+    expect(processed.messages[1].content[0].text.startsWith('# Environment')).toBe(true)
+    expect(processed.messages[1].content[0].cache_control).toEqual({
+      type: 'ephemeral',
+      ttl: '1h'
+    })
+  })
+
+  it('首条 user 只有一个 reminder 时仍补齐为 3 个 text block', () => {
+    const body = {
+      model: 'claude-opus-5-5',
+      messages: [
+        {
+          role: 'user',
+          content: [{ type: 'text', text: '<system-reminder>client reminder</system-reminder>' }]
+        }
+      ]
+    }
+
+    const processed = claudeRelayService._processRequestBody(body, { id: 'acct-reminder' }, false)
+
+    expect(processed.messages[0].content).toHaveLength(3)
+    expect(processed.messages[0].content.every((block) => block.type === 'text')).toBe(true)
+  })
+
+  it('Environment 模板保留完整 cwd、刷新日期且不暴露 relay 主机环境', () => {
+    const body = {
+      model: 'claude-opus-5-5',
+      system: "Primary working directory: /home/frontend\nToday's date is 2030-01-02.",
+      messages: [{ role: 'user', content: [{ type: 'text', text: 'hello' }] }]
+    }
+
+    const processed = claudeRelayService._processRequestBody(body, { id: 'acct-env2' }, false)
+    const environment = processed.messages[1].content[0].text
+    expect(environment).toContain('Primary working directory: /home/frontend')
+    expect(environment).toContain("Today's date is 2030-01-02.")
+    expect(environment).toContain('OS Version: Linux 5.10.134-19.8.al8.x86_64')
+    expect(environment).not.toContain(require('os').release())
+  })
+
+  it('canonical 处理后 cache_control 数量不超过上游限制 4', async () => {
+    const account = { id: 'acct-cache', useUnifiedUserAgent: 'false' }
+    const body = {
+      model: 'claude-opus-5-5',
+      messages: [
+        { role: 'user', content: [{ type: 'text', text: 'hello' }] },
+        ...Array.from({ length: 4 }, (_, index) => ({
+          role: 'system',
+          content: [{ type: 'text', text: `system-${index}` }]
+        }))
+      ]
+    }
+    const processed = claudeRelayService._processRequestBody(body, account, false)
+    const prepared = await claudeRelayService._prepareRequestHeadersAndPayload(
+      processed,
+      {},
+      account.id,
+      'sk-ant-oat0-cache-test',
+      { account, requestOptions: {}, isStream: true, sessionHash: null }
+    )
+    const count = [
+      ...prepared.requestPayload.system,
+      ...prepared.requestPayload.messages.flatMap((message) =>
+        Array.isArray(message.content) ? message.content : []
+      )
+    ].filter((block) => block?.cache_control).length
+
+    expect(count).toBeLessThanOrEqual(4)
+  })
+
+  it('真 CLI 已带 generic/main/environment 时不会重复迁移', () => {
+    const profile = claudeCodeProfile.getProfile()
+    const environment = profile.system.environmentTemplate
+      .replace('{{WORKING_DIRECTORY}}', '/tmp/project')
+      .replace('{{IS_GIT_REPOSITORY}}', 'false')
+      .replace('{{PLATFORM}}', 'linux')
+      .replace('{{SHELL}}', 'bash')
+      .replace('{{OS_VERSION}}', 'Linux test')
+    const body = {
+      model: 'claude-opus-5-5',
+      // 故意提供错误顺序，归一化后必须恢复为 user → system(Environment)
+      messages: [
+        {
+          role: 'system',
+          content: [
+            {
+              type: 'text',
+              text: environment,
+              cache_control: { type: 'ephemeral', ttl: '1h' }
+            }
+          ]
+        },
+        { role: 'user', content: [{ type: 'text', text: 'hello' }] }
+      ],
+      system: [
+        { type: 'text', text: profile.system.identity },
+        { type: 'text', text: profile.system.genericInstructions },
+        { type: 'text', text: profile.system.mainInstructions }
+      ]
+    }
+
+    const processed = claudeRelayService._processRequestBody(body, { id: 'acct-real' }, true)
+
+    expect(processed.messages.map((message) => message.role)).toEqual(['user', 'system'])
+    expect(processed.messages.filter((message) => message.role === 'system')).toHaveLength(1)
   })
 
   it('emulation 请求头：UA/会话 id 与 body 自洽，且带上版本声明头', async () => {
@@ -252,12 +410,12 @@ describe('Claude Code emulation version (v2.1.280)', () => {
     const { headers } = prepared
     const bodySessionId = metadataUserIdHelper.extractSessionId(processed.metadata.user_id)
 
-    expect(headers['User-Agent']).toBe(`claude-cli/${EXPECTED_VERSION} (external, cli)`)
+    expect(headers['User-Agent']).toBe(`claude-cli/${EXPECTED_VERSION} (external, sdk-cli)`)
     expect(headers['anthropic-dispatch-id']).toBe('v2d')
     expect(headers['x-claude-code-request-class']).toBe('main')
     expect(headers['x-client-request-id']).toMatch(/^[0-9a-f-]{36}$/)
     // header 与 body 必须是同一个会话 id（真实 CLI 三者一致）
-    expect(headers['x-claude-code-session-id']).toBe(bodySessionId)
+    expect(headers['X-Claude-Code-Session-Id']).toBe(bodySessionId)
     expect(headers['anthropic-beta']).toBe(claudeCodeProfile.getProfile().betas.join(','))
   })
 
@@ -285,7 +443,12 @@ describe('Claude Code emulation version (v2.1.280)', () => {
 
     // 真 CC 自带的 system 被迁入 messages，system 被替换为中转合成形态
     expect(processed.system[0].text).toMatch(/^x-anthropic-billing-header: cc_version=2\.1\.280\./)
+    expect(processed.system).toHaveLength(4)
     expect(processed.system[1].text).toBe(profile.system.identity)
+    expect(processed.system[2].text).toBe(profile.system.genericInstructions)
+    expect(processed.system[3].text).toContain('<total_tokens>15000000 tokens left</total_tokens>')
+    expect(processed.messages[0].role).toBe('user')
+    expect(processed.messages[1].role).toBe('system')
     expect(JSON.stringify(processed.messages)).toContain('GENUINE CLI MAIN PROMPT')
     expect(JSON.stringify(processed.system)).not.toContain('GENUINE CLI MAIN PROMPT')
     // 真 CC 自带的 metadata 同样被统一覆盖
